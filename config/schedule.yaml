@@ -1,0 +1,35 @@
+# Social Media Posting Schedule Configuration
+# Recommended slots for X and LinkedIn targeting US/EU developer audiences.
+# Note: These values are universal priors/placeholders and should be verified/tuned with audience analytics.
+
+version: "1.0"
+user_timezone: "Africa/Nairobi"
+
+x:
+  - day_of_week: "Monday"
+    time: "14:00"
+    audience_timezone: "UTC"
+    source: "US/EU Developer Engagement Benchmark Prior (Placeholder)"
+    retrieved_on: "2025-01-01"
+  - day_of_week: "Wednesday"
+    time: "15:00"
+    audience_timezone: "UTC"
+    source: "US/EU Developer Engagement Benchmark Prior (Placeholder)"
+    retrieved_on: "2025-01-01"
+  - day_of_week: "Friday"
+    time: "13:00"
+    audience_timezone: "UTC"
+    source: "US/EU Developer Engagement Benchmark Prior (Placeholder)"
+    retrieved_on: "2025-01-01"
+
+linkedin:
+  - day_of_week: "Tuesday"
+    time: "10:00"
+    audience_timezone: "UTC"
+    source: "B2B Tech Engagement Benchmark Prior (Placeholder)"
+    retrieved_on: "2025-01-01"
+  - day_of_week: "Thursday"
+    time: "14:00"
+    audience_timezone: "UTC"
+    source: "B2B Tech Engagement Benchmark Prior (Placeholder)"
+    retrieved_on: "2025-01-01"

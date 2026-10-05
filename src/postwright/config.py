@@ -1,0 +1,24 @@
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
+    llm_model: str = Field(default="claude-3-5-sonnet-20241022", alias="LLM_MODEL")
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+
+    postwright_live: bool = Field(default=False, alias="POSTWRIGHT_LIVE")
+
+    langchain_tracing_v2: bool = Field(default=False, alias="LANGCHAIN_TRACING_V2")
+    langchain_api_key: str | None = Field(default=None, alias="LANGCHAIN_API_KEY")
+    langchain_project: str = Field(default="postwright", alias="LANGCHAIN_PROJECT")
+
+
+def get_settings() -> Settings:
+    return Settings()
