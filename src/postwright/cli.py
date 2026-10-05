@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -10,10 +11,14 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from postwright.graph import create_graph, get_checkpointer
+from postwright.scheduler import check_staleness
 from postwright.state import HumanReviewDecision, InputNote, PostwrightState
-from postwright.store import ApprovalHistoryStore
+from postwright.store import ApprovalHistoryStore, QueueStore
 
 app = typer.Typer(name="postwright", help="Turn build notes into social media posts.")
+queue_app = typer.Typer(name="queue", help="Manage scheduled post queue.")
+app.add_typer(queue_app, name="queue")
+
 console = Console()
 
 
@@ -39,6 +44,13 @@ def get_pending_threads(checkpointer: Any, graph: Any) -> list[dict[str, Any]]:
     return pending
 
 
+def display_staleness_warnings() -> None:
+    """Check schedule priors and display warnings if stale."""
+    warnings = check_staleness()
+    for w in warnings:
+        console.print(f"[bold yellow]⚠️  WARNING:[/] {w}")
+
+
 @app.command()
 def run(
     note: Annotated[
@@ -55,6 +67,8 @@ def run(
     ] = None,
 ) -> None:
     """Process build notes and generate social media drafts."""
+    display_staleness_warnings()
+
     if not note and not file:
         console.print("[bold red]Error:[/] Either --note or --file must be provided.")
         raise typer.Exit(code=1)
@@ -104,6 +118,8 @@ def review(
     ] = None,
 ) -> None:
     """Review interrupted runs and provide human decision."""
+    display_staleness_warnings()
+
     checkpointer = get_checkpointer()
     graph = create_graph(checkpointer=checkpointer)
 
@@ -161,11 +177,19 @@ def review(
         critique = d.get("critique")
         rev_count = d.get("revision_count", 0)
         below_thresh = d.get("below_threshold", False)
+        slot_data = d.get("proposed_slot")
 
         score_str = f"{score}/20" if score is not None else "N/A"
         warning = " [bold red]⚠️ BELOW THRESHOLD[/]" if below_thresh else ""
 
+        slot_str = "None"
+        if slot_data and isinstance(slot_data, dict):
+            local_dt = slot_data.get("scheduled_at_local")
+            tz = slot_data.get("user_timezone", "Africa/Nairobi")
+            slot_str = f"{local_dt} ({tz})"
+
         body = content
+        body += f"\n\n[bold cyan]Proposed Slot:[/] {slot_str}"
         if critique:
             body += f"\n\n[bold yellow]Critique:[/] {critique}"
 
@@ -190,9 +214,22 @@ def review(
             "Select draft ID", choices=draft_ids, default=draft_ids[0]
         )
 
+    slot_override = None
+    if action in ("approve", "edit"):
+        change_slot = Prompt.ask(
+            "Change proposed slot?", choices=["y", "n"], default="n"
+        )
+        if change_slot.lower() == "y":
+            slot_input = Prompt.ask(
+                "Enter new slot (ISO format, e.g. 2025-05-10T14:00:00+03:00)"
+            )
+            slot_override = slot_input.strip()
+
     decision: HumanReviewDecision | None = None
     if action == "approve":
-        decision = HumanReviewDecision(decision="approve", draft_id=selected_draft_id)
+        decision = HumanReviewDecision(
+            decision="approve", draft_id=selected_draft_id, slot_override=slot_override
+        )
 
     elif action == "edit":
         current_draft = next(
@@ -202,7 +239,10 @@ def review(
         console.print(f"\n[bold cyan]Current Content:[/]\n{current_content}\n")
         new_text = Prompt.ask("Enter replacement text", default=current_content)
         decision = HumanReviewDecision(
-            decision="edit", draft_id=selected_draft_id, edit_text=new_text
+            decision="edit",
+            draft_id=selected_draft_id,
+            edit_text=new_text,
+            slot_override=slot_override,
         )
 
     elif action == "reject":
@@ -233,6 +273,76 @@ def review(
         status = res.get("status") if isinstance(res, dict) else "completed"
         console.print(
             f"\n[bold green]Decision '{action}' applied successfully. Run status: {status}[/]"
+        )
+
+
+@queue_app.callback(invoke_without_command=True)
+def queue_list(ctx: typer.Context) -> None:
+    """List queued posts sorted by slot time."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    store = QueueStore()
+    queued = store.get_queued_posts(status="queued")
+
+    if not queued:
+        console.print("[bold yellow]No queued posts found.[/]")
+        return
+
+    now_utc = datetime.now(UTC)
+    table = Table(title="Scheduled Post Queue")
+    table.add_column("ID", style="cyan")
+    table.add_column("Platform", style="magenta")
+    table.add_column("Local Time", style="bold green")
+    table.add_column("Countdown", style="yellow")
+    table.add_column("Draft ID", style="blue")
+    table.add_column("Thread ID", style="dim")
+
+    for rec in queued:
+        dt_utc = datetime.fromisoformat(rec.slot_utc)
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=UTC)
+        else:
+            dt_utc = dt_utc.astimezone(UTC)
+
+        diff = dt_utc - now_utc
+        if diff.total_seconds() <= 0:
+            countdown = "Due now / past"
+        else:
+            hours, remainder = divmod(int(diff.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            days, hours = divmod(hours, 24)
+            if days > 0:
+                countdown = f"in {days}d {hours}h {minutes}m"
+            elif hours > 0:
+                countdown = f"in {hours}h {minutes}m"
+            else:
+                countdown = f"in {minutes}m {seconds}s"
+
+        table.add_row(
+            str(rec.id),
+            rec.platform.upper(),
+            f"{rec.slot_local} ({rec.user_timezone})",
+            countdown,
+            rec.draft_id,
+            rec.thread_id,
+        )
+
+    console.print(table)
+
+
+@queue_app.command(name="cancel")
+def queue_cancel(
+    post_id: Annotated[int, typer.Argument(help="ID of the queued post to cancel.")]
+) -> None:
+    """Cancel a queued post by ID."""
+    store = QueueStore()
+    success = store.cancel_post(post_id)
+    if success:
+        console.print(f"[bold green]Successfully cancelled queued post ID {post_id}.[/]")
+    else:
+        console.print(
+            f"[bold red]Failed to cancel post ID {post_id}. Post not found or not in queued status.[/]"
         )
 
 

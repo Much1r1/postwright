@@ -292,8 +292,8 @@ def test_cli_run_review_and_history(tmp_path: Any, monkeypatch: pytest.MonkeyPat
     assert "No approved post history found" in hist_res1.stdout
 
     # Review command approves post
-    # Input simulation for review choices: action 'approve'
-    rev_res = runner.invoke(app, ["review", "--thread-id", "cli-thread-1"], input="approve\n")
+    # Input simulation: decision 'approve', change proposed slot 'n'
+    rev_res = runner.invoke(app, ["review", "--thread-id", "cli-thread-1"], input="approve\nn\n")
     assert rev_res.exit_code == 0
     assert "Decision 'approve' applied successfully" in rev_res.stdout
 

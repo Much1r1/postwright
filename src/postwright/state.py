@@ -30,6 +30,13 @@ class AngledIdea(BaseModel):
     target_platform: Literal["x", "linkedin"]
 
 
+class ScheduledSlot(BaseModel):
+    platform: Literal["x", "linkedin"]
+    scheduled_at_utc: datetime
+    scheduled_at_local: datetime
+    user_timezone: str = "Africa/Nairobi"
+
+
 class CandidateDraft(BaseModel):
     id: str
     idea_id: str
@@ -44,6 +51,7 @@ class CandidateDraft(BaseModel):
     below_threshold: bool = False
     previous_best_content: str | None = None
     previous_best_score: int | None = None
+    proposed_slot: ScheduledSlot | None = None
 
 
 class DraftCritique(BaseModel):
@@ -70,18 +78,12 @@ class HumanReviewDecision(BaseModel):
     draft_id: str | None = None
     edit_text: str | None = None
     rewrite_note: str | None = None
-
-
-class ScheduledSlot(BaseModel):
-    platform: Literal["x", "linkedin"]
-    scheduled_at_utc: datetime
-    scheduled_at_local: datetime
-    user_timezone: str = "Africa/Nairobi"
+    slot_override: ScheduledSlot | str | None = None
 
 
 class PostwrightState(BaseModel):
     thread_id: str | None = None
-    raw_note: InputNote | None = None
+    raw_note: InputNote | str | dict[str, Any] | None = None
     extracted_ideas: list[ExtractedIdea] = Field(default_factory=list)
     angled_ideas: list[AngledIdea] = Field(default_factory=list)
     candidate_drafts: list[CandidateDraft] = Field(default_factory=list)

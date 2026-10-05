@@ -15,10 +15,13 @@ from postwright.nodes import (
     extract_ideas_node,
     human_review_node,
     pick_angles_node,
+    pick_slot_node,
     record_node,
+    schedule_node,
 )
+from postwright.scheduler import SlotPolicy
 from postwright.state import PostwrightState
-from postwright.store import AngleHistoryStore, ApprovalHistoryStore
+from postwright.store import AngleHistoryStore, ApprovalHistoryStore, QueueStore
 
 
 def get_checkpointer(db_path: str | Path | None = None) -> SqliteSaver:
@@ -32,7 +35,7 @@ def get_checkpointer(db_path: str | Path | None = None) -> SqliteSaver:
 
 
 def should_revise_critic(state: PostwrightState | dict[str, Any]) -> str:
-    """Determine whether to route back to draft or proceed to human_review based on scores."""
+    """Determine whether to route back to draft or proceed to pick_slot based on scores."""
     if isinstance(state, dict):
         candidate_drafts = state.get("candidate_drafts", [])
         revision_count = state.get("revision_count", 0)
@@ -51,7 +54,7 @@ def should_revise_critic(state: PostwrightState | dict[str, Any]) -> str:
     if has_failing and revision_count < max_revisions:
         return "draft"
 
-    return "human_review"
+    return "pick_slot"
 
 
 def should_continue_human(state: PostwrightState | dict[str, Any]) -> str:
@@ -64,7 +67,7 @@ def should_continue_human(state: PostwrightState | dict[str, Any]) -> str:
         candidate_drafts = state.candidate_drafts
 
     if human_decision in ("approve", "edit"):
-        return "record"
+        return "schedule"
     elif human_decision == "rewrite":
         return "draft"
     elif human_decision == "reject":
@@ -79,6 +82,8 @@ def create_graph(
     llm: BaseChatModel | None = None,
     store: AngleHistoryStore | None = None,
     approval_store: ApprovalHistoryStore | None = None,
+    queue_store: QueueStore | None = None,
+    slot_policy: SlotPolicy | None = None,
     critic_score_threshold: int | None = None,
     max_revisions: int | None = None,
     max_human_rewrites: int | None = None,
@@ -123,11 +128,17 @@ def create_graph(
         state.max_human_rewrites = eff_max_human_rewrites
         return critic_node(state, llm=llm)
 
+    def pick_slot_fn(state: PostwrightState) -> dict[str, Any]:
+        return pick_slot_node(state, policy=slot_policy, queue_store=queue_store)
+
     def human_review_fn(state: PostwrightState) -> dict[str, Any]:
         state.critic_score_threshold = eff_threshold
         state.max_revisions = eff_max_revisions
         state.max_human_rewrites = eff_max_human_rewrites
-        return human_review_node(state)
+        return human_review_node(state, queue_store=queue_store)
+
+    def schedule_fn(state: PostwrightState) -> dict[str, Any]:
+        return schedule_node(state, queue_store=queue_store)
 
     def record_fn(state: PostwrightState) -> dict[str, Any]:
         return record_node(state, store=approval_store)
@@ -145,7 +156,9 @@ def create_graph(
     workflow.add_node("pick_angles", pick_angles_fn)
     workflow.add_node("draft", draft_fn)
     workflow.add_node("critic", critic_fn)
+    workflow.add_node("pick_slot", pick_slot_fn)
     workflow.add_node("human_review", human_review_fn)
+    workflow.add_node("schedule", schedule_fn)
     workflow.add_node("record", record_fn)
 
     workflow.add_edge(START, "capture")
@@ -159,21 +172,24 @@ def create_graph(
         router_critic_fn,
         {
             "draft": "draft",
-            "human_review": "human_review",
+            "pick_slot": "pick_slot",
         },
     )
+
+    workflow.add_edge("pick_slot", "human_review")
 
     workflow.add_conditional_edges(
         "human_review",
         router_human_fn,
         {
-            "record": "record",
+            "schedule": "schedule",
             "draft": "draft",
             "human_review": "human_review",
             END: END,
         },
     )
 
+    workflow.add_edge("schedule", "record")
     workflow.add_edge("record", END)
 
     if checkpointer is True or checkpointer is None:
