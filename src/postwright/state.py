@@ -38,6 +38,12 @@ class CandidateDraft(BaseModel):
     content: str
     is_thread: bool = False
     thread_parts: list[str] = Field(default_factory=list)
+    score: int | None = None
+    critique: str | None = None
+    revision_count: int = 0
+    below_threshold: bool = False
+    previous_best_content: str | None = None
+    previous_best_score: int | None = None
 
 
 class DraftCritique(BaseModel):
@@ -74,6 +80,10 @@ class PostwrightState(BaseModel):
     critiques: list[DraftCritique] = Field(default_factory=list)
     revision_count: int = 0
     max_revisions: int = 2
+    critic_score_threshold: int = 14
+    total_llm_calls: int = 0
+    draft_revision_counts: dict[str, int] = Field(default_factory=dict)
+    below_threshold: bool = False
     selected_draft: CandidateDraft | None = None
     proposed_slot: ScheduledSlot | None = None
     human_decision: Literal["approve", "edit", "reject", "rewrite"] | None = None

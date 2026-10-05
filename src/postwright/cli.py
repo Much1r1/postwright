@@ -60,6 +60,10 @@ def run(
         content = getattr(draft, "content", "")
         is_thread = getattr(draft, "is_thread", False)
         thread_parts = getattr(draft, "thread_parts", [])
+        score = getattr(draft, "score", None)
+        rev_count = getattr(draft, "revision_count", 0)
+        below_thresh = getattr(draft, "below_threshold", False)
+        critique = getattr(draft, "critique", None)
 
         body = content
         if is_thread and thread_parts:
@@ -67,8 +71,17 @@ def run(
                 f"{idx+1}. {part}" for idx, part in enumerate(thread_parts)
             )
 
-        title = f"Draft #{i} | Platform: {platform} | Angle: {angle_format}"
-        panel = Panel(body, title=title, border_style="cyan", expand=False)
+        if critique:
+            body += f"\n\n[bold yellow]Critique:[/] {critique}"
+
+        if below_thresh:
+            body = "[bold red]⚠️ WARNING: BELOW THRESHOLD[/]\n\n" + body
+
+        score_str = f"{score}/20" if score is not None else "N/A"
+        warning = " [bold red]⚠️ BELOW THRESHOLD[/]" if below_thresh else ""
+
+        title = f"Draft #{i} | Platform: {platform} | Angle: {angle_format} | Score: {score_str} | Revisions: {rev_count}{warning}"
+        panel = Panel(body, title=title, border_style="red" if below_thresh else "cyan", expand=False)
         console.print(panel)
 
 
