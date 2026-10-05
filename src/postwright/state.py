@@ -65,6 +65,13 @@ class DraftCritique(BaseModel):
         )
 
 
+class HumanReviewDecision(BaseModel):
+    decision: Literal["approve", "edit", "reject", "rewrite"]
+    draft_id: str | None = None
+    edit_text: str | None = None
+    rewrite_note: str | None = None
+
+
 class ScheduledSlot(BaseModel):
     platform: Literal["x", "linkedin"]
     scheduled_at_utc: datetime
@@ -73,6 +80,7 @@ class ScheduledSlot(BaseModel):
 
 
 class PostwrightState(BaseModel):
+    thread_id: str | None = None
     raw_note: InputNote | None = None
     extracted_ideas: list[ExtractedIdea] = Field(default_factory=list)
     angled_ideas: list[AngledIdea] = Field(default_factory=list)
@@ -83,10 +91,12 @@ class PostwrightState(BaseModel):
     critic_score_threshold: int = 14
     total_llm_calls: int = 0
     draft_revision_counts: dict[str, int] = Field(default_factory=dict)
+    human_rewrite_counts: dict[str, int] = Field(default_factory=dict)
+    max_human_rewrites: int = 3
     below_threshold: bool = False
     selected_draft: CandidateDraft | None = None
     proposed_slot: ScheduledSlot | None = None
     human_decision: Literal["approve", "edit", "reject", "rewrite"] | None = None
     user_feedback: str | None = None
-    edit_diff: dict[str, Any] | None = None
+    edit_diff: str | dict[str, Any] | None = None
     status: str = "pending"
