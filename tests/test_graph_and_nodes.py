@@ -10,11 +10,17 @@ from postwright.graph import create_graph
 from postwright.llm import get_llm
 from postwright.nodes import (
     CandidateDraftsOutput,
+    CriticOutput,
     ExtractedIdeasOutput,
+    SingleDraftCritiqueOutput,
     capture_node,
     draft_node,
     extract_ideas_node,
     pick_angles_node,
+)
+from postwright.prompts import (
+    get_critic_system_prompt,
+    get_drafter_system_prompt,
 )
 from postwright.state import (
     AngledIdea,
@@ -59,13 +65,11 @@ def test_llm_factory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_capture_node() -> None:
-    # Test dictionary state with string note
     res1 = capture_node({"raw_note": "My build note"})
     assert isinstance(res1["raw_note"], InputNote)
     assert res1["raw_note"].content == "My build note"
     assert res1["raw_note"].source == "cli"
 
-    # Test InputNote object state
     note = InputNote(content="Test note", source="file.md", project_tag="postwright")
     state2 = PostwrightState(raw_note=note)
     res2 = capture_node(state2)
@@ -102,6 +106,7 @@ def test_extract_ideas_node() -> None:
 
     assert len(res["extracted_ideas"]) == 2
     assert res["extracted_ideas"][0].summary == "Debugged SQLite checkpointing"
+    assert res["total_llm_calls"] == 1
 
 
 def test_pick_angles_node_rotation(tmp_path: Any) -> None:
@@ -118,12 +123,10 @@ def test_pick_angles_node_rotation(tmp_path: Any) -> None:
     res1 = pick_angles_node(state, store=store)
 
     angled1 = res1["angled_ideas"]
-    # 3 ideas x 2 platforms (x, linkedin) = 6 angled ideas
     assert len(angled1) == 6
     formats1 = [a.angle_format for a in angled1[::2]]
     assert formats1 == ["build_log", "lesson", "opinion"]
 
-    # Run again for 2 ideas, should continue rotation starting from diagram_prompt
     ideas2 = [
         ExtractedIdea(id="4", summary="Idea 4"),
         ExtractedIdea(id="5", summary="Idea 5"),
@@ -167,23 +170,15 @@ def test_draft_node() -> None:
     assert len(res["candidate_drafts"]) == 2
     assert res["candidate_drafts"][0].platform == "x"
     assert res["candidate_drafts"][1].platform == "linkedin"
+    assert res["total_llm_calls"] == 1
 
 
-def test_full_graph_end_to_end(tmp_path: Any) -> None:
+def test_pass_on_first_try(tmp_path: Any) -> None:
     db_file = tmp_path / "test_store.db"
     store = AngleHistoryStore(db_path=db_file)
 
     fake_ideas = ExtractedIdeasOutput(
-        ideas=[
-            ExtractedIdea(
-                id="idea-1",
-                summary="LangGraph core implementation",
-                what_was_built="StateGraph with nodes",
-                what_broke="Missing edge",
-                what_was_learned="Wire nodes explicitly",
-                numerical_result="4 nodes implemented",
-            )
-        ]
+        ideas=[ExtractedIdea(id="idea-1", summary="LangGraph core implementation")]
     )
     fake_drafts = CandidateDraftsOutput(
         drafts=[
@@ -192,20 +187,226 @@ def test_full_graph_end_to_end(tmp_path: Any) -> None:
                 idea_id="idea-1",
                 platform="x",
                 angle_format="build_log",
-                content="Built core LangGraph nodes today.",
+                content="Built core LangGraph nodes today with 100% test coverage.",
+            )
+        ]
+    )
+    fake_critique = CriticOutput(
+        critiques=[
+            SingleDraftCritiqueOutput(
+                draft_id="draft-1",
+                voice_match_score=4,
+                clarity_score=4,
+                specificity_score=4,
+                hook_strength_score=4,
+                critique="Solid post with clear metric.",
             )
         ]
     )
 
-    fake_llm = FakeStructuredLLM(responses=[fake_ideas, fake_drafts])
-
-    graph = create_graph(llm=fake_llm, store=store)
+    fake_llm = FakeStructuredLLM(responses=[fake_ideas, fake_drafts, fake_critique])
+    graph = create_graph(llm=fake_llm, store=store, critic_score_threshold=14, max_revisions=2)
 
     initial_state = PostwrightState(raw_note=InputNote(content="Implemented LangGraph core nodes."))
     final_state = graph.invoke(initial_state)
 
-    assert final_state["raw_note"].content == "Implemented LangGraph core nodes."
-    assert len(final_state["extracted_ideas"]) == 1
-    assert len(final_state["angled_ideas"]) == 2  # x + linkedin
+    assert final_state["revision_count"] == 0
+    assert final_state["below_threshold"] is False
+    assert final_state["total_llm_calls"] == 3
     assert len(final_state["candidate_drafts"]) == 1
-    assert final_state["candidate_drafts"][0].content == "Built core LangGraph nodes today."
+    assert final_state["candidate_drafts"][0].score == 16
+
+
+def test_failing_draft_revised_and_better_version_kept(tmp_path: Any) -> None:
+    db_file = tmp_path / "test_store.db"
+    store = AngleHistoryStore(db_path=db_file)
+
+    fake_ideas = ExtractedIdeasOutput(
+        ideas=[ExtractedIdea(id="idea-1", summary="LangGraph core implementation")]
+    )
+    # Draft 1 initial (gets score 10 < 14)
+    fake_drafts_v1 = CandidateDraftsOutput(
+        drafts=[
+            CandidateDraft(
+                id="draft-1",
+                idea_id="idea-1",
+                platform="x",
+                angle_format="build_log",
+                content="Built core LangGraph nodes.",
+            )
+        ]
+    )
+    fake_critique_v1 = CriticOutput(
+        critiques=[
+            SingleDraftCritiqueOutput(
+                draft_id="draft-1",
+                voice_match_score=2,
+                clarity_score=3,
+                specificity_score=2,
+                hook_strength_score=3,
+                critique="Missing specific metrics and weak hook.",
+            )
+        ]
+    )
+    # Revision 1 (gets score 16 >= 14)
+    fake_drafts_v2 = CandidateDraftsOutput(
+        drafts=[
+            CandidateDraft(
+                id="draft-1",
+                idea_id="idea-1",
+                platform="x",
+                angle_format="build_log",
+                content="Spent 2 hours wiring 4 LangGraph nodes. Reached 100% test coverage.",
+            )
+        ]
+    )
+    fake_critique_v2 = CriticOutput(
+        critiques=[
+            SingleDraftCritiqueOutput(
+                draft_id="draft-1",
+                voice_match_score=4,
+                clarity_score=4,
+                specificity_score=4,
+                hook_strength_score=4,
+                critique="Great revision with clear numbers and strong hook.",
+            )
+        ]
+    )
+
+    fake_llm = FakeStructuredLLM(
+        responses=[fake_ideas, fake_drafts_v1, fake_critique_v1, fake_drafts_v2, fake_critique_v2]
+    )
+    graph = create_graph(llm=fake_llm, store=store, critic_score_threshold=14, max_revisions=2)
+
+    initial_state = PostwrightState(raw_note=InputNote(content="Implemented LangGraph core nodes."))
+    final_state = graph.invoke(initial_state)
+
+    assert final_state["revision_count"] == 1
+    assert final_state["below_threshold"] is False
+    assert final_state["candidate_drafts"][0].score == 16
+    assert "Spent 2 hours wiring 4 LangGraph nodes" in final_state["candidate_drafts"][0].content
+
+
+def test_loop_stops_at_cap_and_flags_below_threshold(tmp_path: Any) -> None:
+    db_file = tmp_path / "test_store.db"
+    store = AngleHistoryStore(db_path=db_file)
+
+    fake_ideas = ExtractedIdeasOutput(
+        ideas=[ExtractedIdea(id="idea-1", summary="LangGraph core implementation")]
+    )
+
+    # Initial draft + 2 revisions, all failing
+    fake_drafts_1 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="V1 draft")])
+    fake_critique_1 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=2, clarity_score=2, specificity_score=2, hook_strength_score=2, critique="V1 weak")])
+
+    fake_drafts_2 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="V2 draft")])
+    fake_critique_2 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=2, clarity_score=3, specificity_score=2, hook_strength_score=2, critique="V2 still weak")])
+
+    fake_drafts_3 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="V3 draft")])
+    fake_critique_3 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=3, clarity_score=3, specificity_score=2, hook_strength_score=2, critique="V3 still below threshold")])
+
+    fake_llm = FakeStructuredLLM(
+        responses=[
+            fake_ideas,
+            fake_drafts_1, fake_critique_1,
+            fake_drafts_2, fake_critique_2,
+            fake_drafts_3, fake_critique_3,
+        ]
+    )
+
+    graph = create_graph(llm=fake_llm, store=store, critic_score_threshold=14, max_revisions=2)
+
+    initial_state = PostwrightState(raw_note=InputNote(content="Implemented LangGraph core nodes."))
+    final_state = graph.invoke(initial_state)
+
+    assert final_state["revision_count"] == 2
+    assert final_state["below_threshold"] is True
+    assert final_state["candidate_drafts"][0].below_threshold is True
+    assert final_state["candidate_drafts"][0].score == 10  # score of V3 (score 10)
+
+
+def test_revision_never_overwrites_higher_scoring_earlier_version(tmp_path: Any) -> None:
+    db_file = tmp_path / "test_store.db"
+    store = AngleHistoryStore(db_path=db_file)
+
+    fake_ideas = ExtractedIdeasOutput(
+        ideas=[ExtractedIdea(id="idea-1", summary="LangGraph core implementation")]
+    )
+
+    # Initial draft gets score 13 (< 14 threshold)
+    fake_drafts_1 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="V1 draft with score 13")])
+    fake_critique_1 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=3, clarity_score=3, specificity_score=3, hook_strength_score=4, critique="V1 score 13")])
+
+    # Revision 1 gets score 8 (< 13)
+    fake_drafts_2 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="Worse V2 draft with score 8")])
+    fake_critique_2 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=2, clarity_score=2, specificity_score=2, hook_strength_score=2, critique="V2 score 8")])
+
+    # Revision 2 gets score 16 (>= 14)
+    fake_drafts_3 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="Great V3 draft with score 16")])
+    fake_critique_3 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=4, clarity_score=4, specificity_score=4, hook_strength_score=4, critique="V3 score 16")])
+
+    fake_llm = FakeStructuredLLM(
+        responses=[
+            fake_ideas,
+            fake_drafts_1, fake_critique_1,
+            fake_drafts_2, fake_critique_2,
+            fake_drafts_3, fake_critique_3,
+        ]
+    )
+
+    graph = create_graph(llm=fake_llm, store=store, critic_score_threshold=14, max_revisions=2)
+
+    initial_state = PostwrightState(raw_note=InputNote(content="Implemented LangGraph core nodes."))
+    final_state = graph.invoke(initial_state)
+
+    # V2 was ignored because score 8 < score 13. Then V3 (score 16) was kept!
+    assert final_state["revision_count"] == 2
+    assert final_state["below_threshold"] is False
+    assert final_state["candidate_drafts"][0].score == 16
+    assert "Great V3 draft" in final_state["candidate_drafts"][0].content
+
+
+def test_lower_scoring_revision_preserves_earlier_draft_content(tmp_path: Any) -> None:
+    db_file = tmp_path / "test_store.db"
+    store = AngleHistoryStore(db_path=db_file)
+
+    fake_ideas = ExtractedIdeasOutput(
+        ideas=[ExtractedIdea(id="idea-1", summary="LangGraph core implementation")]
+    )
+
+    fake_drafts_1 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="Original score 12 content")])
+    fake_critique_1 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=3, clarity_score=3, specificity_score=3, hook_strength_score=3, critique="V1 score 12")])
+
+    fake_drafts_2 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="Worse score 8 content")])
+    fake_critique_2 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=2, clarity_score=2, specificity_score=2, hook_strength_score=2, critique="V2 score 8")])
+
+    fake_drafts_3 = CandidateDraftsOutput(drafts=[CandidateDraft(id="draft-1", idea_id="idea-1", platform="x", angle_format="build_log", content="Worse score 10 content")])
+    fake_critique_3 = CriticOutput(critiques=[SingleDraftCritiqueOutput(draft_id="draft-1", voice_match_score=2, clarity_score=3, specificity_score=2, hook_strength_score=3, critique="V3 score 10")])
+
+    fake_llm = FakeStructuredLLM(
+        responses=[
+            fake_ideas,
+            fake_drafts_1, fake_critique_1,
+            fake_drafts_2, fake_critique_2,
+            fake_drafts_3, fake_critique_3,
+        ]
+    )
+
+    graph = create_graph(llm=fake_llm, store=store, critic_score_threshold=14, max_revisions=2)
+
+    initial_state = PostwrightState(raw_note=InputNote(content="Implemented LangGraph core nodes."))
+    final_state = graph.invoke(initial_state)
+
+    assert final_state["revision_count"] == 2
+    assert final_state["below_threshold"] is True
+    assert final_state["candidate_drafts"][0].score == 12
+    assert final_state["candidate_drafts"][0].content == "Original score 12 content"
+
+
+def test_critic_prompt_separate_and_no_drafter_prompt() -> None:
+    critic_prompt = get_critic_system_prompt()
+    drafter_prompt = get_drafter_system_prompt()
+
+    assert "EVALUATION CRITERIA" in critic_prompt
+    assert "voice_match" in critic_prompt
+    assert drafter_prompt not in critic_prompt

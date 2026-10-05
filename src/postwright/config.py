@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="claude-3-5-sonnet-20241022", alias="LLM_MODEL")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
 
+    critic_score_threshold: int = Field(default=14, alias="CRITIC_SCORE_THRESHOLD")
+    max_revisions: int = Field(default=2, alias="MAX_REVISIONS")
+
     postwright_live: bool = Field(default=False, alias="POSTWRIGHT_LIVE")
 
     langchain_tracing_v2: bool = Field(default=False, alias="LANGCHAIN_TRACING_V2")
