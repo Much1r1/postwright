@@ -34,7 +34,10 @@ def test_cli_file_not_found() -> None:
     assert "does not exist" in result.stdout
 
 
-def test_cli_run_with_note(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_run_with_note(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    cp_file = tmp_path / "checkpoints.db"
+    monkeypatch.setenv("POSTWRIGHT_CHECKPOINT_DB", str(cp_file))
+
     fake_ideas = ExtractedIdeasOutput(
         ideas=[ExtractedIdea(id="idea-1", summary="CLI Test")]
     )
@@ -65,19 +68,24 @@ def test_cli_run_with_note(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def mock_create_graph(**kwargs: Any) -> Any:
         from postwright.graph import create_graph
-        return create_graph(llm=fake_llm, store=kwargs.get("store"))
+        return create_graph(
+            llm=fake_llm,
+            store=kwargs.get("store"),
+            checkpointer=kwargs.get("checkpointer"),
+        )
 
     monkeypatch.setattr("postwright.cli.create_graph", mock_create_graph)
 
-    result = runner.invoke(app, ["run", "--note", "CLI note content"])
+    result = runner.invoke(app, ["run", "--note", "CLI note content", "--thread-id", "test-cli-run-1"])
     assert result.exit_code == 0
-    assert "Generated 1 candidate draft(s)" in result.stdout
-    assert "Test draft content for CLI" in result.stdout
-    assert "Score: 16/20" in result.stdout
-    assert "Revisions: 0" in result.stdout
+    assert "Run paused at human review" in result.stdout
+    assert "test-cli-run-1" in result.stdout
 
 
-def test_cli_run_below_threshold_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_run_below_threshold_warning(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    cp_file = tmp_path / "checkpoints.db"
+    monkeypatch.setenv("POSTWRIGHT_CHECKPOINT_DB", str(cp_file))
+
     fake_ideas = ExtractedIdeasOutput(
         ideas=[ExtractedIdea(id="idea-1", summary="Below threshold test")]
     )
@@ -99,12 +107,17 @@ def test_cli_run_below_threshold_warning(monkeypatch: pytest.MonkeyPatch) -> Non
 
     def mock_create_graph(**kwargs: Any) -> Any:
         from postwright.graph import create_graph
-        return create_graph(llm=fake_llm, store=kwargs.get("store"), critic_score_threshold=14, max_revisions=2)
+        return create_graph(
+            llm=fake_llm,
+            store=kwargs.get("store"),
+            critic_score_threshold=14,
+            max_revisions=2,
+            checkpointer=kwargs.get("checkpointer"),
+        )
 
     monkeypatch.setattr("postwright.cli.create_graph", mock_create_graph)
 
-    result = runner.invoke(app, ["run", "--note", "Note for below threshold"])
+    result = runner.invoke(app, ["run", "--note", "Note for below threshold", "--thread-id", "test-cli-thresh-1"])
     assert result.exit_code == 0
-    assert "Score: 10/20" in result.stdout
-    assert "Revisions: 2" in result.stdout
-    assert "BELOW THRESHOLD" in result.stdout
+    assert "Run paused at human review" in result.stdout
+    assert "test-cli-thresh-1" in result.stdout

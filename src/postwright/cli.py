@@ -1,15 +1,42 @@
+import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from langgraph.types import Command
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
 
-from postwright.graph import create_graph
-from postwright.state import InputNote, PostwrightState
+from postwright.graph import create_graph, get_checkpointer
+from postwright.state import HumanReviewDecision, InputNote, PostwrightState
+from postwright.store import ApprovalHistoryStore
 
 app = typer.Typer(name="postwright", help="Turn build notes into social media posts.")
 console = Console()
+
+
+def get_pending_threads(checkpointer: Any, graph: Any) -> list[dict[str, Any]]:
+    """Return all threads currently interrupted at human review."""
+    pending = []
+    seen = set()
+    cp_list = list(checkpointer.list(config=None))
+    for cp in cp_list:
+        tid = cp.config.get("configurable", {}).get("thread_id")
+        if tid and tid not in seen:
+            seen.add(tid)
+            st = graph.get_state({"configurable": {"thread_id": tid}})
+            if st.next and any(t.interrupts for t in st.tasks):
+                interrupt_val = st.tasks[0].interrupts[0].value
+                pending.append(
+                    {
+                        "thread_id": tid,
+                        "interrupt_value": interrupt_val,
+                        "state": st,
+                    }
+                )
+    return pending
 
 
 @app.command()
@@ -22,6 +49,9 @@ def run(
     ] = None,
     project_tag: Annotated[
         str | None, typer.Option("--project-tag", "-p", help="Optional project tag.")
+    ] = None,
+    thread_id: Annotated[
+        str | None, typer.Option("--thread-id", "-t", help="Thread ID for execution.")
     ] = None,
 ) -> None:
     """Process build notes and generate social media drafts."""
@@ -39,49 +69,198 @@ def run(
         note_content = file.read_text(encoding="utf-8")
         source = str(file)
 
+    eff_thread_id = thread_id or f"run-{uuid.uuid4().hex[:8]}"
     input_note = InputNote(content=note_content, source=source, project_tag=project_tag)
-    initial_state = PostwrightState(raw_note=input_note)
+    initial_state = PostwrightState(thread_id=eff_thread_id, raw_note=input_note)
 
-    console.print("[bold blue]Running postwright graph...[/]")
-    graph = create_graph()
-    final_state = graph.invoke(initial_state)
+    checkpointer = get_checkpointer()
+    graph = create_graph(checkpointer=checkpointer)
 
-    drafts = final_state.get("candidate_drafts", [])
+    config = {"configurable": {"thread_id": eff_thread_id}}
 
-    if not drafts:
-        console.print("[bold yellow]No drafts were generated.[/]")
+    console.print(f"[bold blue]Running postwright graph (Thread ID: {eff_thread_id})...[/]")
+    result = graph.invoke(initial_state, config=config)
+
+    state = graph.get_state(config)
+    if state.next and any(t.interrupts for t in state.tasks):
+        console.print("\n[bold yellow]Run paused at human review.[/]")
+        console.print(f"Thread ID: [bold cyan]{eff_thread_id}[/]")
+        console.print(
+            f"Run '[bold green]postwright review --thread-id {eff_thread_id}[/]' to review and resume."
+        )
         return
 
-    console.print(f"\n[bold green]Generated {len(drafts)} candidate draft(s):[/]\n")
+    drafts = result.get("candidate_drafts", []) if isinstance(result, dict) else []
+    if drafts:
+        console.print(
+            f"\n[bold green]Run completed successfully. Drafts generated: {len(drafts)}[/]"
+        )
 
-    for i, draft in enumerate(drafts, start=1):
-        platform = str(getattr(draft, "platform", "x")).upper()
-        angle_format = getattr(draft, "angle_format", "general")
-        content = getattr(draft, "content", "")
-        is_thread = getattr(draft, "is_thread", False)
-        thread_parts = getattr(draft, "thread_parts", [])
-        score = getattr(draft, "score", None)
-        rev_count = getattr(draft, "revision_count", 0)
-        below_thresh = getattr(draft, "below_threshold", False)
-        critique = getattr(draft, "critique", None)
 
-        body = content
-        if is_thread and thread_parts:
-            body += "\n\n[bold cyan]Thread Parts:[/]\n" + "\n---\n".join(
-                f"{idx+1}. {part}" for idx, part in enumerate(thread_parts)
-            )
+@app.command()
+def review(
+    thread_id: Annotated[
+        str | None, typer.Option("--thread-id", "-t", help="Thread ID to review.")
+    ] = None,
+) -> None:
+    """Review interrupted runs and provide human decision."""
+    checkpointer = get_checkpointer()
+    graph = create_graph(checkpointer=checkpointer)
 
-        if critique:
-            body += f"\n\n[bold yellow]Critique:[/] {critique}"
+    target_thread_id = thread_id
 
-        if below_thresh:
-            body = "[bold red]⚠️ WARNING: BELOW THRESHOLD[/]\n\n" + body
+    if not target_thread_id:
+        pending = get_pending_threads(checkpointer, graph)
+        if not pending:
+            console.print("[bold yellow]No pending interrupted runs found.[/]")
+            return
+
+        if len(pending) == 1:
+            target_thread_id = pending[0]["thread_id"]
+        else:
+            table = Table(title="Pending Interrupted Runs")
+            table.add_column("Index", style="cyan")
+            table.add_column("Thread ID", style="bold green")
+            table.add_column("Drafts Count", style="magenta")
+
+            for idx, item in enumerate(pending, start=1):
+                drafts_item = item["interrupt_value"].get("drafts", [])
+                table.add_row(str(idx), str(item["thread_id"]), str(len(drafts_item)))
+
+            console.print(table)
+            choices = [str(i) for i in range(1, len(pending) + 1)]
+            selected_idx = Prompt.ask("Select run to review", choices=choices, default="1")
+            target_thread_id = pending[int(selected_idx) - 1]["thread_id"]
+
+    config = {"configurable": {"thread_id": target_thread_id}}
+    state = graph.get_state(config)
+
+    if not state.next or not any(t.interrupts for t in state.tasks):
+        console.print(
+            f"[bold red]No pending human review interrupt found for thread '{target_thread_id}'.[/]"
+        )
+        return
+
+    interrupt_val = state.tasks[0].interrupts[0].value
+    drafts = interrupt_val.get("drafts", [])
+
+    if not drafts:
+        console.print("[bold yellow]No candidate drafts found in this run.[/]")
+        return
+
+    console.print(
+        f"\n[bold green]Interrupted Run Drafts for Thread '{target_thread_id}':[/]\n"
+    )
+
+    for i, d in enumerate(drafts, start=1):
+        d_id = d.get("id")
+        platform = str(d.get("platform", "x")).upper()
+        angle_format = d.get("angle_format", "general")
+        content = d.get("content", "")
+        score = d.get("score")
+        critique = d.get("critique")
+        rev_count = d.get("revision_count", 0)
+        below_thresh = d.get("below_threshold", False)
 
         score_str = f"{score}/20" if score is not None else "N/A"
         warning = " [bold red]⚠️ BELOW THRESHOLD[/]" if below_thresh else ""
 
-        title = f"Draft #{i} | Platform: {platform} | Angle: {angle_format} | Score: {score_str} | Revisions: {rev_count}{warning}"
-        panel = Panel(body, title=title, border_style="red" if below_thresh else "cyan", expand=False)
+        body = content
+        if critique:
+            body += f"\n\n[bold yellow]Critique:[/] {critique}"
+
+        title = f"[{i}] ID: {d_id} | Platform: {platform} | Angle: {angle_format} | Score: {score_str} | Revisions: {rev_count}{warning}"
+        panel = Panel(
+            body, title=title, border_style="red" if below_thresh else "cyan", expand=False
+        )
+        console.print(panel)
+
+    action = Prompt.ask(
+        "\nDecision action",
+        choices=["approve", "edit", "reject", "rewrite"],
+        default="approve",
+    )
+
+    draft_ids = [str(d.get("id")) for d in drafts if d.get("id")]
+    selected_draft_id = None
+    if len(drafts) == 1:
+        selected_draft_id = draft_ids[0] if draft_ids else None
+    elif draft_ids:
+        selected_draft_id = Prompt.ask(
+            "Select draft ID", choices=draft_ids, default=draft_ids[0]
+        )
+
+    decision: HumanReviewDecision | None = None
+    if action == "approve":
+        decision = HumanReviewDecision(decision="approve", draft_id=selected_draft_id)
+
+    elif action == "edit":
+        current_draft = next(
+            (d for d in drafts if d.get("id") == selected_draft_id), drafts[0]
+        )
+        current_content = current_draft.get("content", "")
+        console.print(f"\n[bold cyan]Current Content:[/]\n{current_content}\n")
+        new_text = Prompt.ask("Enter replacement text", default=current_content)
+        decision = HumanReviewDecision(
+            decision="edit", draft_id=selected_draft_id, edit_text=new_text
+        )
+
+    elif action == "reject":
+        decision = HumanReviewDecision(decision="reject", draft_id=selected_draft_id)
+
+    elif action == "rewrite":
+        note = Prompt.ask("Enter note / instructions for rewrite")
+        decision = HumanReviewDecision(
+            decision="rewrite", draft_id=selected_draft_id, rewrite_note=note
+        )
+
+    if decision is None:
+        console.print("[bold red]No decision was selected.[/]")
+        return
+
+    console.print(
+        f"[bold blue]Resuming graph execution for thread '{target_thread_id}'...[/]"
+    )
+    res = graph.invoke(Command(resume=decision.model_dump()), config=config)
+
+    new_state = graph.get_state(config)
+    if new_state.next and any(t.interrupts for t in new_state.tasks):
+        console.print(f"\n[bold yellow]Draft routed back to review after {action}.[/]")
+        console.print(
+            f"Run '[bold green]postwright review --thread-id {target_thread_id}[/]' to continue review."
+        )
+    else:
+        status = res.get("status") if isinstance(res, dict) else "completed"
+        console.print(
+            f"\n[bold green]Decision '{action}' applied successfully. Run status: {status}[/]"
+        )
+
+
+@app.command()
+def history(
+    limit: Annotated[
+        int, typer.Option("--limit", "-l", help="Limit number of history items.")
+    ] = 20,
+) -> None:
+    """List approved posts history with diffs."""
+    store = ApprovalHistoryStore()
+    records = store.get_history(limit=limit)
+
+    if not records:
+        console.print("[bold yellow]No approved post history found.[/]")
+        return
+
+    console.print(f"\n[bold green]Approved Post History ({len(records)} record(s)):[/]\n")
+
+    for i, rec in enumerate(records, start=1):
+        score_str = f"{rec.score}/20" if rec.score is not None else "N/A"
+        title = f"History #{i} | Thread: {rec.thread_id} | Draft ID: {rec.draft_id} | Score: {score_str} | Date: {rec.created_at}"
+
+        body = f"[bold green]Final Approved Text:[/]\n{rec.final_text}"
+        if rec.unified_diff:
+            body += f"\n\n[bold yellow]Unified Diff:[/]\n{rec.unified_diff}"
+
+        panel = Panel(body, title=title, border_style="green", expand=False)
         console.print(panel)
 
 

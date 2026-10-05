@@ -2,9 +2,121 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel
+
+from postwright.config import get_settings
+
 DEFAULT_DB_PATH = Path("postwright_store.db")
 
 FormatType = Literal["build_log", "lesson", "opinion", "diagram_prompt"]
+
+
+class ApprovalHistoryRecord(BaseModel):
+    id: int | None = None
+    thread_id: str
+    draft_id: str
+    original_draft: str
+    final_text: str
+    unified_diff: str
+    score: int | None = None
+    created_at: str | None = None
+
+
+class ApprovalHistoryStore:
+
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            self.db_path = get_settings().postwright_store_db
+        else:
+            self.db_path = str(db_path)
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    draft_id TEXT NOT NULL,
+                    original_draft TEXT NOT NULL,
+                    final_text TEXT NOT NULL,
+                    unified_diff TEXT NOT NULL,
+                    score INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.commit()
+
+    def record_approval(
+        self,
+        thread_id: str,
+        draft_id: str,
+        original_draft: str,
+        final_text: str,
+        unified_diff: str,
+        score: int | None = None,
+    ) -> ApprovalHistoryRecord:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO approval_history (thread_id, draft_id, original_draft, final_text, unified_diff, score)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (thread_id, draft_id, original_draft, final_text, unified_diff, score),
+            )
+            rec_id = cursor.lastrowid
+            conn.commit()
+
+            cursor.execute(
+                "SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, created_at FROM approval_history WHERE id = ?",
+                (rec_id,),
+            )
+            row = cursor.fetchone()
+            return ApprovalHistoryRecord(
+                id=row["id"],
+                thread_id=row["thread_id"],
+                draft_id=row["draft_id"],
+                original_draft=row["original_draft"],
+                final_text=row["final_text"],
+                unified_diff=row["unified_diff"],
+                score=row["score"],
+                created_at=str(row["created_at"]),
+            )
+
+    def get_history(self, limit: int = 50) -> list[ApprovalHistoryRecord]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, created_at
+                FROM approval_history
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                ApprovalHistoryRecord(
+                    id=row["id"],
+                    thread_id=row["thread_id"],
+                    draft_id=row["draft_id"],
+                    original_draft=row["original_draft"],
+                    final_text=row["final_text"],
+                    unified_diff=row["unified_diff"],
+                    score=row["score"],
+                    created_at=str(row["created_at"]),
+                )
+                for row in rows
+            ]
 FORMAT_CYCLE: list[FormatType] = ["build_log", "lesson", "opinion", "diagram_prompt"]
 
 

@@ -15,6 +15,14 @@ class Settings(BaseSettings):
 
     critic_score_threshold: int = Field(default=14, alias="CRITIC_SCORE_THRESHOLD")
     max_revisions: int = Field(default=2, alias="MAX_REVISIONS")
+    max_human_rewrites: int = Field(default=3, alias="MAX_HUMAN_REWRITES")
+
+    postwright_checkpoint_db: str = Field(
+        default="postwright_checkpoints.db", alias="POSTWRIGHT_CHECKPOINT_DB"
+    )
+    postwright_store_db: str = Field(
+        default="postwright_store.db", alias="POSTWRIGHT_STORE_DB"
+    )
 
     postwright_live: bool = Field(default=False, alias="POSTWRIGHT_LIVE")
 

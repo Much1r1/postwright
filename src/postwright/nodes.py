@@ -1,8 +1,10 @@
+import difflib
 import uuid
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from postwright.config import get_settings
@@ -17,11 +19,12 @@ from postwright.state import (
     CandidateDraft,
     DraftCritique,
     ExtractedIdea,
+    HumanReviewDecision,
     InputNote,
     PostwrightState,
     utc_now,
 )
-from postwright.store import AngleHistoryStore
+from postwright.store import AngleHistoryStore, ApprovalHistoryStore
 
 
 class ExtractedIdeasOutput(BaseModel):
@@ -227,25 +230,34 @@ def draft_node(
             "draft_revision_counts": draft_revision_counts,
         }
 
-    # Selective revision of failing drafts
-    failing_drafts = [d for d in existing_drafts if d.score is None or d.score < threshold]
+    # Selective revision of failing drafts or human-requested rewrites
+    user_feedback = (
+        state.get("user_feedback")
+        if isinstance(state, dict)
+        else getattr(state, "user_feedback", None)
+    )
+
+    failing_drafts = [d for d in existing_drafts if d.score is None or d.score < threshold or user_feedback]
     if not failing_drafts:
-        return {"candidate_drafts": existing_drafts}
+        return {"candidate_drafts": existing_drafts, "user_feedback": None}
 
     system_prompt = get_revision_system_prompt()
 
     failing_descriptions = []
     for d in failing_drafts:
+        fb_text = d.critique or "Needs higher specificity, clarity, or hook strength."
+        if user_feedback:
+            fb_text += f"\nHuman Feedback / Note for Rewrite: {user_feedback}"
         failing_descriptions.append(
             f"Draft ID: {d.id}\n"
             f"Platform: {d.platform}\n"
             f"Angle Format: {d.angle_format}\n"
             f"Current Content:\n{d.content}\n"
-            f"Critique / Feedback:\n{d.critique or 'Needs higher specificity, clarity, or hook strength.'}\n"
+            f"Critique / Feedback:\n{fb_text}\n"
         )
 
     user_prompt = (
-        "Please revise only the following failing social media drafts addressing the feedback provided:\n\n"
+        "Please revise only the following social media drafts addressing the feedback provided:\n\n"
         + "\n---\n".join(failing_descriptions)
     )
 
@@ -309,7 +321,206 @@ def draft_node(
         "total_llm_calls": total_llm_calls + 1,
         "draft_revision_counts": draft_revision_counts,
         "revision_count": revision_count + 1,
+        "user_feedback": None,
     }
+
+
+def human_review_node(state: PostwrightState | dict[str, Any]) -> dict[str, Any]:
+    """Pause graph execution for human review and process resume decision."""
+    if isinstance(state, dict):
+        candidate_drafts = state.get("candidate_drafts", [])
+        thread_id = state.get("thread_id")
+        human_rewrite_counts = dict(state.get("human_rewrite_counts", {}))
+        max_human_rewrites = state.get(
+            "max_human_rewrites", get_settings().max_human_rewrites
+        )
+    else:
+        candidate_drafts = state.candidate_drafts
+        thread_id = state.thread_id
+        human_rewrite_counts = dict(state.human_rewrite_counts)
+        max_human_rewrites = state.max_human_rewrites
+
+    top_drafts_payload = []
+    for d in candidate_drafts:
+        top_drafts_payload.append(
+            {
+                "id": d.id,
+                "idea_id": d.idea_id,
+                "platform": d.platform,
+                "angle_format": d.angle_format,
+                "content": d.content,
+                "score": d.score,
+                "critique": d.critique,
+                "revision_count": d.revision_count,
+                "below_threshold": d.below_threshold,
+            }
+        )
+
+    interrupt_data = {
+        "drafts": top_drafts_payload,
+        "thread_id": thread_id,
+    }
+
+    resume_input = interrupt(interrupt_data)
+
+    if isinstance(resume_input, HumanReviewDecision):
+        decision = resume_input
+    elif isinstance(resume_input, dict):
+        decision = HumanReviewDecision(**resume_input)
+    else:
+        raise TypeError("Invalid resume decision provided to human_review node.")
+
+    decision_type = decision.decision
+
+    if decision_type == "approve":
+        selected_draft = None
+        if decision.draft_id:
+            for d in candidate_drafts:
+                if d.id == decision.draft_id:
+                    selected_draft = d
+                    break
+        if not selected_draft and candidate_drafts:
+            selected_draft = candidate_drafts[0]
+
+        if not selected_draft:
+            raise ValueError("No candidate draft available to approve.")
+
+        return {
+            "selected_draft": selected_draft,
+            "human_decision": "approve",
+            "status": "approved",
+            "edit_diff": "",
+        }
+
+    elif decision_type == "edit":
+        selected_draft = None
+        if decision.draft_id:
+            for d in candidate_drafts:
+                if d.id == decision.draft_id:
+                    selected_draft = d
+                    break
+        if not selected_draft and candidate_drafts:
+            selected_draft = candidate_drafts[0]
+
+        if not selected_draft:
+            raise ValueError("No candidate draft available to edit.")
+
+        original_text = selected_draft.content
+        final_text = decision.edit_text if decision.edit_text is not None else original_text
+
+        diff_lines = list(
+            difflib.unified_diff(
+                original_text.splitlines(keepends=True),
+                final_text.splitlines(keepends=True),
+                fromfile="original",
+                tofile="edited",
+            )
+        )
+        edit_diff = "".join(diff_lines)
+
+        edited_draft = CandidateDraft(
+            id=selected_draft.id,
+            idea_id=selected_draft.idea_id,
+            platform=selected_draft.platform,
+            angle_format=selected_draft.angle_format,
+            content=final_text,
+            is_thread=selected_draft.is_thread,
+            thread_parts=selected_draft.thread_parts,
+            score=selected_draft.score,
+            critique=selected_draft.critique,
+            revision_count=selected_draft.revision_count,
+            below_threshold=selected_draft.below_threshold,
+            previous_best_content=original_text,
+            previous_best_score=selected_draft.score,
+        )
+
+        updated_candidate_drafts = [
+            edited_draft if d.id == selected_draft.id else d for d in candidate_drafts
+        ]
+
+        return {
+            "selected_draft": edited_draft,
+            "candidate_drafts": updated_candidate_drafts,
+            "human_decision": "edit",
+            "status": "approved",
+            "edit_diff": edit_diff,
+        }
+
+    elif decision_type == "reject":
+        target_id = decision.draft_id
+        if target_id:
+            updated_candidate_drafts = [d for d in candidate_drafts if d.id != target_id]
+        else:
+            updated_candidate_drafts = []
+
+        return {
+            "candidate_drafts": updated_candidate_drafts,
+            "human_decision": "reject",
+            "status": "rejected" if not updated_candidate_drafts else "pending_review",
+        }
+
+    elif decision_type == "rewrite":
+        target_id = decision.draft_id or (
+            candidate_drafts[0].id if candidate_drafts else "default"
+        )
+        current_rewrites = human_rewrite_counts.get(target_id, 0)
+        if current_rewrites >= max_human_rewrites:
+            raise ValueError(
+                f"Human-requested rewrites limit ({max_human_rewrites}) exceeded for draft {target_id}."
+            )
+
+        human_rewrite_counts[target_id] = current_rewrites + 1
+
+        return {
+            "human_rewrite_counts": human_rewrite_counts,
+            "user_feedback": decision.rewrite_note,
+            "human_decision": "rewrite",
+            "status": "needs_rewrite",
+        }
+
+    else:
+        raise ValueError(f"Unknown human decision type: {decision_type}")
+
+
+def record_node(
+    state: PostwrightState | dict[str, Any],
+    store: ApprovalHistoryStore | None = None,
+) -> dict[str, Any]:
+    """Store approved draft, diff, scores, timestamp, and thread_id in SQLite."""
+    if isinstance(state, dict):
+        human_decision = state.get("human_decision")
+        selected_draft = state.get("selected_draft")
+        thread_id = state.get("thread_id") or "unknown"
+        edit_diff = state.get("edit_diff") or ""
+    else:
+        human_decision = state.human_decision
+        selected_draft = state.selected_draft
+        thread_id = state.thread_id or "unknown"
+        edit_diff = state.edit_diff or ""
+
+    if human_decision not in ("approve", "edit") or selected_draft is None:
+        raise ValueError("Cannot record post without a valid resume approval/edit decision.")
+
+    if store is None:
+        store = ApprovalHistoryStore()
+
+    if isinstance(selected_draft, dict):
+        selected_draft = CandidateDraft(**selected_draft)
+
+    original_draft = selected_draft.previous_best_content or selected_draft.content
+    final_text = selected_draft.content
+    diff_str = str(edit_diff) if isinstance(edit_diff, str) else str(edit_diff or "")
+
+    store.record_approval(
+        thread_id=thread_id,
+        draft_id=selected_draft.id,
+        original_draft=original_draft,
+        final_text=final_text,
+        unified_diff=diff_str,
+        score=selected_draft.score,
+    )
+
+    return {"status": "recorded"}
 
 
 def critic_node(
