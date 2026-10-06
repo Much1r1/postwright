@@ -10,7 +10,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from postwright.config import get_settings
-from postwright.llm import get_llm
+from postwright.llm import get_llm, invoke_with_resilience
 from postwright.prompts import (
     get_critic_system_prompt,
     get_drafter_system_prompt,
@@ -90,9 +90,13 @@ def extract_ideas_node(
     if isinstance(state, dict):
         raw_note = state.get("raw_note")
         total_llm_calls = state.get("total_llm_calls", 0)
+        llm_retries = state.get("llm_retries", 0)
+        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
     else:
         raw_note = state.raw_note
         total_llm_calls = state.total_llm_calls
+        llm_retries = state.llm_retries
+        llm_wait_time = state.llm_wait_time_seconds
 
     note_content = raw_note.content if isinstance(raw_note, InputNote) else str(raw_note)
 
@@ -108,13 +112,17 @@ def extract_ideas_node(
 
     user_prompt = f"Build Note:\n{note_content}"
 
-    structured_llm = llm.with_structured_output(ExtractedIdeasOutput)
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
 
-    res = structured_llm.invoke(messages)
+    res, retries, wait_sec = invoke_with_resilience(
+        llm=llm,
+        messages=messages,
+        schema=ExtractedIdeasOutput,
+    )
+
     if isinstance(res, ExtractedIdeasOutput):
         ideas = res.ideas
     elif isinstance(res, dict) and "ideas" in res:
@@ -126,7 +134,12 @@ def extract_ideas_node(
         if not idea.id:
             idea.id = f"idea-{idx + 1}-{uuid.uuid4().hex[:6]}"
 
-    return {"extracted_ideas": ideas, "total_llm_calls": total_llm_calls + 1}
+    return {
+        "extracted_ideas": ideas,
+        "total_llm_calls": total_llm_calls + 1,
+        "llm_retries": llm_retries + retries,
+        "llm_wait_time_seconds": llm_wait_time + wait_sec,
+    }
 
 
 def pick_angles_node(
@@ -171,6 +184,8 @@ def draft_node(
         angled_ideas = state.get("angled_ideas", [])
         existing_drafts = state.get("candidate_drafts", [])
         total_llm_calls = state.get("total_llm_calls", 0)
+        llm_retries = state.get("llm_retries", 0)
+        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         draft_revision_counts = dict(state.get("draft_revision_counts", {}))
         revision_count = state.get("revision_count", 0)
         threshold = state.get("critic_score_threshold", get_settings().critic_score_threshold)
@@ -178,6 +193,8 @@ def draft_node(
         angled_ideas = state.angled_ideas
         existing_drafts = state.candidate_drafts
         total_llm_calls = state.total_llm_calls
+        llm_retries = state.llm_retries
+        llm_wait_time = state.llm_wait_time_seconds
         draft_revision_counts = dict(state.draft_revision_counts)
         revision_count = state.revision_count
         threshold = state.critic_score_threshold
@@ -207,13 +224,17 @@ def draft_node(
             formatted_ideas
         )
 
-        structured_llm = llm.with_structured_output(CandidateDraftsOutput)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
-        res = structured_llm.invoke(messages)
+        res, retries, wait_sec = invoke_with_resilience(
+            llm=llm,
+            messages=messages,
+            schema=CandidateDraftsOutput,
+        )
+
         if isinstance(res, CandidateDraftsOutput):
             drafts = res.drafts
         elif isinstance(res, dict) and "drafts" in res:
@@ -228,6 +249,8 @@ def draft_node(
         return {
             "candidate_drafts": drafts,
             "total_llm_calls": total_llm_calls + 1,
+            "llm_retries": llm_retries + retries,
+            "llm_wait_time_seconds": llm_wait_time + wait_sec,
             "draft_revision_counts": draft_revision_counts,
         }
 
@@ -261,13 +284,17 @@ def draft_node(
         + "\n---\n".join(failing_descriptions)
     )
 
-    structured_llm = llm.with_structured_output(CandidateDraftsOutput)
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
 
-    res = structured_llm.invoke(messages)
+    res, retries, wait_sec = invoke_with_resilience(
+        llm=llm,
+        messages=messages,
+        schema=CandidateDraftsOutput,
+    )
+
     if isinstance(res, CandidateDraftsOutput):
         new_drafts = res.drafts
     elif isinstance(res, dict) and "drafts" in res:
@@ -319,6 +346,8 @@ def draft_node(
     return {
         "candidate_drafts": updated_drafts,
         "total_llm_calls": total_llm_calls + 1,
+        "llm_retries": llm_retries + retries,
+        "llm_wait_time_seconds": llm_wait_time + wait_sec,
         "draft_revision_counts": draft_revision_counts,
         "revision_count": revision_count + 1,
         "user_feedback": None,
@@ -336,6 +365,8 @@ def critic_node(
         threshold = state.get("critic_score_threshold", get_settings().critic_score_threshold)
         max_revisions = state.get("max_revisions", get_settings().max_revisions)
         total_llm_calls = state.get("total_llm_calls", 0)
+        llm_retries = state.get("llm_retries", 0)
+        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         revision_count = state.get("revision_count", 0)
         existing_critiques = list(state.get("critiques", []))
     else:
@@ -344,6 +375,8 @@ def critic_node(
         threshold = state.critic_score_threshold
         max_revisions = state.max_revisions
         total_llm_calls = state.total_llm_calls
+        llm_retries = state.llm_retries
+        llm_wait_time = state.llm_wait_time_seconds
         revision_count = state.revision_count
         existing_critiques = list(state.critiques)
 
@@ -375,13 +408,17 @@ def critic_node(
         + "\n---\n".join(draft_descriptions)
     )
 
-    structured_llm = llm.with_structured_output(CriticOutput)
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
 
-    res = structured_llm.invoke(messages)
+    res, retries, wait_sec = invoke_with_resilience(
+        llm=llm,
+        messages=messages,
+        schema=CriticOutput,
+    )
+
     if isinstance(res, CriticOutput):
         items = res.critiques
     elif isinstance(res, dict) and "critiques" in res:
@@ -505,6 +542,8 @@ def critic_node(
         "candidate_drafts": updated_drafts,
         "critiques": new_critiques,
         "total_llm_calls": total_llm_calls + 1,
+        "llm_retries": llm_retries + retries,
+        "llm_wait_time_seconds": llm_wait_time + wait_sec,
         "below_threshold": any_below_threshold,
     }
 
