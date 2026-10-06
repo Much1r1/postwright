@@ -9,9 +9,22 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
-    llm_model: str = Field(default="claude-3-5-sonnet-20241022", alias="LLM_MODEL")
+    llm_provider: str = Field(default="groq", alias="LLM_PROVIDER")
+    # User must explicitly specify a model supporting structured output (e.g., llama-3.3-70b-versatile for Groq, gemini-2.5-flash for Gemini, claude-3-5-sonnet-20241022 for Anthropic)
+    llm_model: str = Field(default="", alias="LLM_MODEL")
+
+    groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
+    google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
+    gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+
+    judge_provider: str = Field(default="groq", alias="JUDGE_PROVIDER")
+    judge_model: str = Field(default="", alias="JUDGE_MODEL")
+
+    max_llm_retries: int = Field(default=3, alias="MAX_LLM_RETRIES")
+    max_llm_calls_per_minute: int | None = Field(
+        default=None, alias="MAX_LLM_CALLS_PER_MINUTE"
+    )
 
     critic_score_threshold: int = Field(default=14, alias="CRITIC_SCORE_THRESHOLD")
     max_revisions: int = Field(default=2, alias="MAX_REVISIONS")
