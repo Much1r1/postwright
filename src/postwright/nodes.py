@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from postwright.config import get_settings
 from postwright.llm import get_llm
+from postwright.platforms.registry import get_adapter
 from postwright.prompts import (
     get_critic_system_prompt,
     get_drafter_system_prompt,
@@ -592,6 +593,11 @@ def human_review_node(
     top_drafts_payload = []
     for d in candidate_drafts:
         slot_dict = d.proposed_slot.model_dump(mode="json") if d.proposed_slot else None
+
+        # Validate and split via platform adapter to show thread splits / errors in review
+        adapter = get_adapter(d.platform)
+        val = adapter.validate(d.content)
+
         top_drafts_payload.append(
             {
                 "id": d.id,
@@ -604,6 +610,9 @@ def human_review_node(
                 "revision_count": d.revision_count,
                 "below_threshold": d.below_threshold,
                 "proposed_slot": slot_dict,
+                "is_valid": val.is_valid,
+                "validation_errors": val.errors,
+                "thread_parts": val.thread_parts,
             }
         )
 
@@ -636,6 +645,22 @@ def human_review_node(
         if not selected_draft:
             raise ValueError("No candidate draft available to approve/edit.")
 
+        original_text = selected_draft.content
+        final_text = (
+            decision.edit_text
+            if decision_type == "edit" and decision.edit_text is not None
+            else original_text
+        )
+
+        # Validate replacement text with adapter - refuse edit if it breaks limits
+        adapter = get_adapter(selected_draft.platform)
+        val_result = adapter.validate(final_text)
+        if not val_result.is_valid:
+            err_msg = "; ".join(val_result.errors)
+            raise ValueError(
+                f"Edit refused: Content breaks platform limits for {selected_draft.platform.upper()}. ({err_msg})"
+            )
+
         # Handle slot override if provided
         final_slot = selected_draft.proposed_slot
         if decision.slot_override:
@@ -651,7 +676,6 @@ def human_review_node(
             if isinstance(decision.slot_override, ScheduledSlot):
                 override_slot = decision.slot_override
             elif isinstance(decision.slot_override, str):
-                # Parse string ISO timestamp or datetime
                 dt = datetime.fromisoformat(decision.slot_override)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=UTC)
@@ -667,13 +691,11 @@ def human_review_node(
             else:
                 raise ValueError(f"Invalid slot_override type: {type(decision.slot_override)}")
 
-            # Validate override slot is not in the past
             if override_slot.scheduled_at_utc <= now_utc:
                 raise ValueError(
                     f"Slot override '{override_slot.scheduled_at_utc.isoformat()}' is in the past."
                 )
 
-            # Validate override slot is not already taken
             queued_records = queue_store.get_queued_posts(status="queued")
             for rec in queued_records:
                 rec_dt = datetime.fromisoformat(rec.slot_utc)
@@ -687,13 +709,6 @@ def human_review_node(
                     )
 
             final_slot = override_slot
-
-        original_text = selected_draft.content
-        final_text = (
-            decision.edit_text
-            if decision_type == "edit" and decision.edit_text is not None
-            else original_text
-        )
 
         edit_diff = ""
         if decision_type == "edit":
@@ -713,8 +728,8 @@ def human_review_node(
             platform=selected_draft.platform,
             angle_format=selected_draft.angle_format,
             content=final_text,
-            is_thread=selected_draft.is_thread,
-            thread_parts=selected_draft.thread_parts,
+            is_thread=len(val_result.thread_parts) > 1,
+            thread_parts=val_result.thread_parts,
             score=selected_draft.score,
             critique=selected_draft.critique,
             revision_count=selected_draft.revision_count,

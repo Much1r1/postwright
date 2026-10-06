@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from postwright.graph import create_graph, get_checkpointer
+from postwright.publisher import PublishingRefusedError, publish_due_posts, publish_post
 from postwright.scheduler import check_staleness
 from postwright.state import HumanReviewDecision, InputNote, PostwrightState
 from postwright.store import ApprovalHistoryStore, QueueStore
@@ -178,6 +179,8 @@ def review(
         rev_count = d.get("revision_count", 0)
         below_thresh = d.get("below_threshold", False)
         slot_data = d.get("proposed_slot")
+        thread_parts = d.get("thread_parts", [])
+        validation_errors = d.get("validation_errors", [])
 
         score_str = f"{score}/20" if score is not None else "N/A"
         warning = " [bold red]⚠️ BELOW THRESHOLD[/]" if below_thresh else ""
@@ -189,6 +192,16 @@ def review(
             slot_str = f"{local_dt} ({tz})"
 
         body = content
+        if thread_parts and len(thread_parts) > 1:
+            body += "\n\n[bold magenta]Thread Parts Split:[/]"
+            for idx, tp in enumerate(thread_parts, start=1):
+                body += f"\n  [{idx}] {tp}"
+
+        if validation_errors:
+            body += "\n\n[bold red]Validation Warnings:[/"
+            for ve in validation_errors:
+                body += f"\n  • {ve}"
+
         body += f"\n\n[bold cyan]Proposed Slot:[/] {slot_str}"
         if critique:
             body += f"\n\n[bold yellow]Critique:[/] {critique}"
@@ -261,7 +274,11 @@ def review(
     console.print(
         f"[bold blue]Resuming graph execution for thread '{target_thread_id}'...[/]"
     )
-    res = graph.invoke(Command(resume=decision.model_dump()), config=config)
+    try:
+        res = graph.invoke(Command(resume=decision.model_dump()), config=config)
+    except ValueError as val_err:
+        console.print(f"[bold red]Decision refused:[/] {val_err}")
+        return
 
     new_state = graph.get_state(config)
     if new_state.next and any(t.interrupts for t in new_state.tasks):
@@ -278,27 +295,28 @@ def review(
 
 @queue_app.callback(invoke_without_command=True)
 def queue_list(ctx: typer.Context) -> None:
-    """List queued posts sorted by slot time."""
+    """List posts in queue with status and platform post ID."""
     if ctx.invoked_subcommand is not None:
         return
 
     store = QueueStore()
-    queued = store.get_queued_posts(status="queued")
+    all_posts = store.get_queued_posts(status=None)
 
-    if not queued:
-        console.print("[bold yellow]No queued posts found.[/]")
+    if not all_posts:
+        console.print("[bold yellow]No posts found in queue.[/]")
         return
 
     now_utc = datetime.now(UTC)
     table = Table(title="Scheduled Post Queue")
     table.add_column("ID", style="cyan")
     table.add_column("Platform", style="magenta")
+    table.add_column("Status", style="bold yellow")
     table.add_column("Local Time", style="bold green")
     table.add_column("Countdown", style="yellow")
-    table.add_column("Draft ID", style="blue")
-    table.add_column("Thread ID", style="dim")
+    table.add_column("Platform Post ID", style="blue")
+    table.add_column("Draft ID", style="dim")
 
-    for rec in queued:
+    for rec in all_posts:
         dt_utc = datetime.fromisoformat(rec.slot_utc)
         if dt_utc.tzinfo is None:
             dt_utc = dt_utc.replace(tzinfo=UTC)
@@ -319,13 +337,17 @@ def queue_list(ctx: typer.Context) -> None:
             else:
                 countdown = f"in {minutes}m {seconds}s"
 
+        status_style = "green" if rec.status == "published" else ("red" if rec.status == "failed" else "yellow")
+        status_str = f"[{status_style}]{rec.status}[/]"
+
         table.add_row(
             str(rec.id),
             rec.platform.upper(),
+            status_str,
             f"{rec.slot_local} ({rec.user_timezone})",
-            countdown,
+            countdown if rec.status == "queued" else "-",
+            rec.platform_post_id or "-",
             rec.draft_id,
-            rec.thread_id,
         )
 
     console.print(table)
@@ -344,6 +366,55 @@ def queue_cancel(
         console.print(
             f"[bold red]Failed to cancel post ID {post_id}. Post not found or not in queued status.[/]"
         )
+
+
+@app.command(name="publish")
+def publish_one(
+    post_id: Annotated[int, typer.Argument(help="ID of the queued post to publish now.")]
+) -> None:
+    """Publish a single queued post immediately (follows safety rules)."""
+    store = QueueStore()
+    post = store.get_post(post_id)
+    if not post:
+        console.print(f"[bold red]Error:[/] Queued post ID {post_id} not found.")
+        raise typer.Exit(code=1)
+
+    try:
+        res = publish_post(post, store=store)
+        if res.success:
+            mode_str = "[yellow](DRY RUN)[/]" if res.dry_run else "[bold green](LIVE)[/]"
+            console.print(
+                f"[bold green]Post {post_id} published successfully {mode_str}. Platform Post ID: {res.platform_post_id}[/]"
+            )
+        else:
+            console.print(
+                f"[bold red]Failed to publish post {post_id}:[/] {res.error_message}"
+            )
+            raise typer.Exit(code=1)
+    except PublishingRefusedError as e:
+        console.print(f"[bold red]Publishing Refused:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+@app.command(name="publish-due")
+def publish_due() -> None:
+    """Publish all queued posts whose slot time has passed."""
+    store = QueueStore()
+    results = publish_due_posts(store=store)
+
+    if not results:
+        console.print("[bold yellow]No due queued posts found for publishing.[/]")
+        return
+
+    console.print(f"\n[bold green]Processed {len(results)} due post(s):[/]\n")
+    for r in results:
+        mode_str = "[yellow](DRY RUN)[/]" if r.dry_run else "[bold green](LIVE)[/]"
+        if r.success:
+            console.print(
+                f" • Success {mode_str} | Platform Post ID: {r.platform_post_id}"
+            )
+        else:
+            console.print(f" • [bold red]Failed:[/] {r.error_message}")
 
 
 @app.command()
