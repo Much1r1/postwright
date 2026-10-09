@@ -1,3 +1,4 @@
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
+from postwright.config import get_settings
+from postwright.eval import get_git_commit, run_eval_suite
 from postwright.graph import create_graph, get_checkpointer
 from postwright.publisher import PublishingRefusedError, publish_due_posts, publish_post
 from postwright.scheduler import check_staleness
@@ -91,12 +94,32 @@ def run(
     checkpointer = get_checkpointer()
     graph = create_graph(checkpointer=checkpointer)
 
-    config = {"configurable": {"thread_id": eff_thread_id}}
+    settings = get_settings()
+    config: dict[str, Any] = {"configurable": {"thread_id": eff_thread_id}}
+
+    if settings.langchain_tracing_v2 or os.getenv("LANGCHAIN_TRACING_V2") == "true":
+        config["tags"] = ["postwright", eff_thread_id, get_git_commit()]
+        config["metadata"] = {
+            "thread_id": eff_thread_id,
+            "git_commit": get_git_commit(),
+            "project_tag": project_tag or "default",
+        }
 
     console.print(f"[bold blue]Running postwright graph (Thread ID: {eff_thread_id})...[/]")
     result = graph.invoke(initial_state, config=config)
 
     state = graph.get_state(config)
+
+    # Print run cost summary
+    calls = result.get("total_llm_calls", 0) if isinstance(result, dict) else 0
+    in_tok = result.get("total_input_tokens", 0) if isinstance(result, dict) else 0
+    out_tok = result.get("total_output_tokens", 0) if isinstance(result, dict) else 0
+    cost = result.get("total_cost", 0.0) if isinstance(result, dict) else 0.0
+
+    console.print(
+        f"\n[dim]Run LLM Summary: {calls} LLM calls | Tokens: {in_tok + out_tok} (in: {in_tok}, out: {out_tok}) | Cost: ${cost:.6f}[/]"
+    )
+
     if state.next and any(t.interrupts for t in state.tasks):
         console.print("\n[bold yellow]Run paused at human review.[/]")
         console.print(f"Thread ID: [bold cyan]{eff_thread_id}[/]")
@@ -293,6 +316,43 @@ def review(
         )
 
 
+@app.command()
+def eval(
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-l", help="Limit to first N cases.")
+    ] = None,
+    case: Annotated[
+        str | None, typer.Option("--case", "-c", help="Specific case ID to evaluate.")
+    ] = None,
+    resume: Annotated[
+        bool, typer.Option("--resume", "-r", help="Resume an interrupted evaluation run.")
+    ] = False,
+    compare: Annotated[
+        Path | None, typer.Option("--compare", help="Path to earlier report markdown for delta comparison.")
+    ] = None,
+) -> None:
+    """Run pipeline evaluation harness against benchmark dataset cases."""
+    console.print("[bold blue]Starting Postwright evaluation suite...[/]")
+
+    def console_printer(msg: str) -> None:
+        console.print(msg)
+
+    _report_md, report_file, extra = run_eval_suite(
+        limit=limit,
+        case_id_filter=case,
+        resume=resume,
+        compare_report_path=compare,
+        console_printer=console_printer,
+    )
+
+    console.print("\n[bold green]Evaluation complete![/]")
+    console.print(f"Report saved to: [bold cyan]{report_file}[/]")
+
+    deltas = extra.get("deltas")
+    if deltas:
+        console.print(f"\n[bold yellow]Comparison Deltas:[/]\n{deltas}")
+
+
 @queue_app.callback(invoke_without_command=True)
 def queue_list(ctx: typer.Context) -> None:
     """List posts in queue with status and platform post ID."""
@@ -435,7 +495,8 @@ def history(
 
     for i, rec in enumerate(records, start=1):
         score_str = f"{rec.score}/20" if rec.score is not None else "N/A"
-        title = f"History #{i} | Thread: {rec.thread_id} | Draft ID: {rec.draft_id} | Score: {score_str} | Date: {rec.created_at}"
+        cost_str = f"${rec.cost:.6f}" if hasattr(rec, "cost") else "$0.00"
+        title = f"History #{i} | Thread: {rec.thread_id} | Draft ID: {rec.draft_id} | Score: {score_str} | Cost: {cost_str} | Date: {rec.created_at}"
 
         body = f"[bold green]Final Approved Text:[/]\n{rec.final_text}"
         if rec.unified_diff:

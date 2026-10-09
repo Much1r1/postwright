@@ -4,7 +4,7 @@ from postwright.config import Settings, get_settings
 def test_settings_defaults() -> None:
     settings = get_settings()
     assert settings.llm_provider == "groq"
-    assert settings.llm_model == ""
+    assert settings.judge_provider == "google"
     assert settings.postwright_live is False
     assert settings.langchain_tracing_v2 is False
 

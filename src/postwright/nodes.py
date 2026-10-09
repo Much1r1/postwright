@@ -10,8 +10,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from postwright.config import get_settings
-from postwright.llm import get_llm, invoke_with_resilience
-from postwright.platforms.registry import get_adapter
+from postwright.llm import get_llm, invoke_llm_with_resilience
 from postwright.prompts import (
     get_critic_system_prompt,
     get_drafter_system_prompt,
@@ -91,6 +90,19 @@ def extract_ideas_node(
     if isinstance(state, dict):
         raw_note = state.get("raw_note")
         total_llm_calls = state.get("total_llm_calls", 0)
+        tot_in = state.get("total_input_tokens", 0)
+        tot_out = state.get("total_output_tokens", 0)
+        tot_cost = state.get("total_cost", 0.0)
+        tot_retries = state.get("llm_retries", 0)
+        tot_wait = state.get("llm_wait_time_seconds", 0.0)
+    else:
+        raw_note = state.raw_note
+        total_llm_calls = state.total_llm_calls
+        tot_in = state.total_input_tokens
+        tot_out = state.total_output_tokens
+        tot_cost = state.total_cost
+        tot_retries = state.llm_retries
+        tot_wait = state.llm_wait_time_seconds
         llm_retries = state.get("llm_retries", 0)
         llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
     else:
@@ -118,6 +130,9 @@ def extract_ideas_node(
         HumanMessage(content=user_prompt),
     ]
 
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
+        structured_llm, messages
+    )
     res, retries, wait_sec = invoke_with_resilience(
         llm=llm,
         messages=messages,
@@ -138,6 +153,11 @@ def extract_ideas_node(
     return {
         "extracted_ideas": ideas,
         "total_llm_calls": total_llm_calls + 1,
+        "total_input_tokens": tot_in + in_tok,
+        "total_output_tokens": tot_out + out_tok,
+        "total_cost": round(tot_cost + cost, 6),
+        "llm_retries": tot_retries + retries,
+        "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
         "llm_retries": llm_retries + retries,
         "llm_wait_time_seconds": llm_wait_time + wait_sec,
     }
@@ -185,6 +205,11 @@ def draft_node(
         angled_ideas = state.get("angled_ideas", [])
         existing_drafts = state.get("candidate_drafts", [])
         total_llm_calls = state.get("total_llm_calls", 0)
+        tot_in = state.get("total_input_tokens", 0)
+        tot_out = state.get("total_output_tokens", 0)
+        tot_cost = state.get("total_cost", 0.0)
+        tot_retries = state.get("llm_retries", 0)
+        tot_wait = state.get("llm_wait_time_seconds", 0.0)
         llm_retries = state.get("llm_retries", 0)
         llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         draft_revision_counts = dict(state.get("draft_revision_counts", {}))
@@ -194,6 +219,11 @@ def draft_node(
         angled_ideas = state.angled_ideas
         existing_drafts = state.candidate_drafts
         total_llm_calls = state.total_llm_calls
+        tot_in = state.total_input_tokens
+        tot_out = state.total_output_tokens
+        tot_cost = state.total_cost
+        tot_retries = state.llm_retries
+        tot_wait = state.llm_wait_time_seconds
         llm_retries = state.llm_retries
         llm_wait_time = state.llm_wait_time_seconds
         draft_revision_counts = dict(state.draft_revision_counts)
@@ -230,6 +260,9 @@ def draft_node(
             HumanMessage(content=user_prompt),
         ]
 
+        res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
+            structured_llm, messages
+        )
         res, retries, wait_sec = invoke_with_resilience(
             llm=llm,
             messages=messages,
@@ -250,8 +283,11 @@ def draft_node(
         return {
             "candidate_drafts": drafts,
             "total_llm_calls": total_llm_calls + 1,
-            "llm_retries": llm_retries + retries,
-            "llm_wait_time_seconds": llm_wait_time + wait_sec,
+            "total_input_tokens": tot_in + in_tok,
+            "total_output_tokens": tot_out + out_tok,
+            "total_cost": round(tot_cost + cost, 6),
+            "llm_retries": tot_retries + retries,
+            "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
             "draft_revision_counts": draft_revision_counts,
         }
 
@@ -290,6 +326,9 @@ def draft_node(
         HumanMessage(content=user_prompt),
     ]
 
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
+        structured_llm, messages
+    )
     res, retries, wait_sec = invoke_with_resilience(
         llm=llm,
         messages=messages,
@@ -347,6 +386,11 @@ def draft_node(
     return {
         "candidate_drafts": updated_drafts,
         "total_llm_calls": total_llm_calls + 1,
+        "total_input_tokens": tot_in + in_tok,
+        "total_output_tokens": tot_out + out_tok,
+        "total_cost": round(tot_cost + cost, 6),
+        "llm_retries": tot_retries + retries,
+        "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
         "llm_retries": llm_retries + retries,
         "llm_wait_time_seconds": llm_wait_time + wait_sec,
         "draft_revision_counts": draft_revision_counts,
@@ -366,6 +410,11 @@ def critic_node(
         threshold = state.get("critic_score_threshold", get_settings().critic_score_threshold)
         max_revisions = state.get("max_revisions", get_settings().max_revisions)
         total_llm_calls = state.get("total_llm_calls", 0)
+        tot_in = state.get("total_input_tokens", 0)
+        tot_out = state.get("total_output_tokens", 0)
+        tot_cost = state.get("total_cost", 0.0)
+        tot_retries = state.get("llm_retries", 0)
+        tot_wait = state.get("llm_wait_time_seconds", 0.0)
         llm_retries = state.get("llm_retries", 0)
         llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         revision_count = state.get("revision_count", 0)
@@ -376,6 +425,11 @@ def critic_node(
         threshold = state.critic_score_threshold
         max_revisions = state.max_revisions
         total_llm_calls = state.total_llm_calls
+        tot_in = state.total_input_tokens
+        tot_out = state.total_output_tokens
+        tot_cost = state.total_cost
+        tot_retries = state.llm_retries
+        tot_wait = state.llm_wait_time_seconds
         llm_retries = state.llm_retries
         llm_wait_time = state.llm_wait_time_seconds
         revision_count = state.revision_count
@@ -414,12 +468,9 @@ def critic_node(
         HumanMessage(content=user_prompt),
     ]
 
-    res, retries, wait_sec = invoke_with_resilience(
-        llm=llm,
-        messages=messages,
-        schema=CriticOutput,
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
+        structured_llm, messages
     )
-
     if isinstance(res, CriticOutput):
         items = res.critiques
     elif isinstance(res, dict) and "critiques" in res:
@@ -543,8 +594,11 @@ def critic_node(
         "candidate_drafts": updated_drafts,
         "critiques": new_critiques,
         "total_llm_calls": total_llm_calls + 1,
-        "llm_retries": llm_retries + retries,
-        "llm_wait_time_seconds": llm_wait_time + wait_sec,
+        "total_input_tokens": tot_in + in_tok,
+        "total_output_tokens": tot_out + out_tok,
+        "total_cost": round(tot_cost + cost, 6),
+        "llm_retries": tot_retries + retries,
+        "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
         "below_threshold": any_below_threshold,
     }
 
@@ -881,11 +935,13 @@ def record_node(
         selected_draft = state.get("selected_draft")
         thread_id = state.get("thread_id") or "unknown"
         edit_diff = state.get("edit_diff") or ""
+        total_cost = state.get("total_cost", 0.0)
     else:
         human_decision = state.human_decision
         selected_draft = state.selected_draft
         thread_id = state.thread_id or "unknown"
         edit_diff = state.edit_diff or ""
+        total_cost = state.total_cost
 
     if human_decision not in ("approve", "edit") or selected_draft is None:
         raise ValueError("Cannot record post without a valid resume approval/edit decision.")
@@ -907,6 +963,7 @@ def record_node(
         final_text=final_text,
         unified_diff=diff_str,
         score=selected_draft.score,
+        cost=total_cost,
     )
 
     return {"status": "recorded"}

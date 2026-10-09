@@ -242,6 +242,7 @@ class ApprovalHistoryRecord(BaseModel):
     final_text: str
     unified_diff: str
     score: int | None = None
+    cost: float = 0.0
     created_at: str | None = None
 
 
@@ -271,10 +272,16 @@ class ApprovalHistoryStore:
                     final_text TEXT NOT NULL,
                     unified_diff TEXT NOT NULL,
                     score INTEGER,
+                    cost REAL DEFAULT 0.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(approval_history)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "cost" not in cols:
+                conn.execute("ALTER TABLE approval_history ADD COLUMN cost REAL DEFAULT 0.0")
             conn.commit()
 
     def record_approval(
@@ -285,21 +292,22 @@ class ApprovalHistoryStore:
         final_text: str,
         unified_diff: str,
         score: int | None = None,
+        cost: float = 0.0,
     ) -> ApprovalHistoryRecord:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO approval_history (thread_id, draft_id, original_draft, final_text, unified_diff, score)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO approval_history (thread_id, draft_id, original_draft, final_text, unified_diff, score, cost)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (thread_id, draft_id, original_draft, final_text, unified_diff, score),
+                (thread_id, draft_id, original_draft, final_text, unified_diff, score, cost),
             )
             rec_id = cursor.lastrowid
             conn.commit()
 
             cursor.execute(
-                "SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, created_at FROM approval_history WHERE id = ?",
+                "SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, cost, created_at FROM approval_history WHERE id = ?",
                 (rec_id,),
             )
             row = cursor.fetchone()
@@ -311,6 +319,7 @@ class ApprovalHistoryStore:
                 final_text=row["final_text"],
                 unified_diff=row["unified_diff"],
                 score=row["score"],
+                cost=row["cost"] if row["cost"] is not None else 0.0,
                 created_at=str(row["created_at"]),
             )
 
@@ -319,7 +328,7 @@ class ApprovalHistoryStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, created_at
+                SELECT id, thread_id, draft_id, original_draft, final_text, unified_diff, score, cost, created_at
                 FROM approval_history
                 ORDER BY id DESC
                 LIMIT ?
@@ -336,6 +345,7 @@ class ApprovalHistoryStore:
                     final_text=row["final_text"],
                     unified_diff=row["unified_diff"],
                     score=row["score"],
+                    cost=row["cost"] if row["cost"] is not None else 0.0,
                     created_at=str(row["created_at"]),
                 )
                 for row in rows

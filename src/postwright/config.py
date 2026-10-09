@@ -10,13 +10,16 @@ class Settings(BaseSettings):
     )
 
     llm_provider: str = Field(default="groq", alias="LLM_PROVIDER")
-    # User must explicitly specify a model supporting structured output
-    llm_model: str = Field(default="", alias="LLM_MODEL")
-
+    llm_model: str = Field(default="llama-3.3-70b-versatile", alias="LLM_MODEL")
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
     google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
-    gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
-    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+
+    judge_provider: str = Field(default="google", alias="JUDGE_PROVIDER")
+    judge_model: str = Field(default="gemini-2.5-flash", alias="JUDGE_MODEL")
+
+    max_llm_retries: int = Field(default=3, alias="MAX_LLM_RETRIES")
+    max_llm_calls_per_minute: int = Field(default=30, alias="MAX_LLM_CALLS_PER_MINUTE")
 
     judge_provider: str = Field(default="groq", alias="JUDGE_PROVIDER")
     judge_model: str = Field(default="", alias="JUDGE_MODEL")
