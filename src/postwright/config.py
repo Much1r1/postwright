@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     max_llm_retries: int = Field(default=3, alias="MAX_LLM_RETRIES")
     max_llm_calls_per_minute: int = Field(default=30, alias="MAX_LLM_CALLS_PER_MINUTE")
 
+    judge_provider: str = Field(default="groq", alias="JUDGE_PROVIDER")
+    judge_model: str = Field(default="", alias="JUDGE_MODEL")
+
+    max_llm_retries: int = Field(default=3, alias="MAX_LLM_RETRIES")
+    max_llm_calls_per_minute: int | None = Field(
+        default=None, alias="MAX_LLM_CALLS_PER_MINUTE"
+    )
+
     critic_score_threshold: int = Field(default=14, alias="CRITIC_SCORE_THRESHOLD")
     max_revisions: int = Field(default=2, alias="MAX_REVISIONS")
     max_human_rewrites: int = Field(default=3, alias="MAX_HUMAN_REWRITES")

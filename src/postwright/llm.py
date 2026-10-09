@@ -6,6 +6,8 @@ from typing import Any, cast
 
 import yaml
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel
 
 from postwright.config import get_settings
 
@@ -132,12 +134,54 @@ def extract_token_counts(res: Any) -> tuple[int, int]:
 def get_llm(
     provider: str | None = None,
     model: str | None = None,
+    is_judge: bool = False,
     **kwargs: Any,
 ) -> BaseChatModel:
-    """Returns a ChatModel instance based on settings or parameters."""
+    """Returns a ChatModel instance based on settings or parameters.
+
+    Supported providers: groq, gemini (or google), anthropic.
+    Default provider is groq (or judge_provider if is_judge=True).
+    """
     settings = get_settings()
-    llm_provider = (provider or settings.llm_provider).lower()
-    llm_model = model or settings.llm_model
+    if is_judge:
+        llm_provider = (provider or settings.judge_provider).lower()
+        llm_model = model or settings.judge_model
+    else:
+        llm_provider = (provider or settings.llm_provider).lower()
+        llm_model = model or settings.llm_model
+
+    if llm_provider == "groq":
+        api_key = settings.groq_api_key or os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GROQ_API_KEY environment variable is required for provider 'groq'."
+            )
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model=llm_model or "placeholder-model",
+            api_key=api_key,  # type: ignore[arg-type]
+            **kwargs,
+        )
+
+    elif llm_provider in ("gemini", "google"):
+        api_key = (
+            settings.google_api_key
+            or settings.gemini_api_key
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+        )
+        if not api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required for provider 'gemini'."
+            )
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(
+            model=llm_model or "placeholder-model",
+            api_key=api_key,
+            **kwargs,
+        )
 
     if llm_provider in ("groq",):
         try:
@@ -193,12 +237,26 @@ def get_llm(
                 **kwargs,
             ),
         )
+
     else:
         from langchain.chat_models import init_chat_model
 
-        return cast(
-            BaseChatModel,
-            init_chat_model(llm_model, model_provider=llm_provider, **kwargs),
+def _get_rate_limiter(
+    calls_per_minute: int | None,
+    time_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> RateLimiter:
+    global _GLOBAL_RATE_LIMITER
+    if (
+        _GLOBAL_RATE_LIMITER is None
+        or _GLOBAL_RATE_LIMITER.calls_per_minute != calls_per_minute
+        or _GLOBAL_RATE_LIMITER.time_fn != time_fn
+        or _GLOBAL_RATE_LIMITER.sleep_fn != sleep_fn
+    ):
+        _GLOBAL_RATE_LIMITER = RateLimiter(
+            calls_per_minute=calls_per_minute,
+            time_fn=time_fn,
+            sleep_fn=sleep_fn,
         )
 
 

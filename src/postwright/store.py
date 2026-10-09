@@ -21,6 +21,9 @@ class QueuedPostRecord(BaseModel):
     slot_local: str
     user_timezone: str
     status: str = "queued"
+    platform_post_id: str | None = None
+    error_message: str | None = None
+    retry_count: int = 0
     created_at: str | None = None
 
 
@@ -52,10 +55,24 @@ class QueueStore:
                     slot_local TEXT NOT NULL,
                     user_timezone TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'queued',
+                    platform_post_id TEXT,
+                    error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(post_queue)")
+            cols = [row["name"] for row in cursor.fetchall()]
+            if "platform_post_id" not in cols:
+                conn.execute("ALTER TABLE post_queue ADD COLUMN platform_post_id TEXT")
+            if "error_message" not in cols:
+                conn.execute("ALTER TABLE post_queue ADD COLUMN error_message TEXT")
+            if "retry_count" not in cols:
+                conn.execute(
+                    "ALTER TABLE post_queue ADD COLUMN retry_count INTEGER DEFAULT 0"
+                )
             conn.commit()
 
     def enqueue(
@@ -91,8 +108,21 @@ class QueueStore:
             rec_id = cursor.lastrowid
             conn.commit()
 
-            cursor.execute("SELECT * FROM post_queue WHERE id = ?", (rec_id,))
+            if rec_id is None:
+                raise RuntimeError("Failed to retrieve lastrowid after inserting post.")
+
+            post = self.get_post(rec_id)
+            if post is None:
+                raise RuntimeError(f"Failed to fetch queued post {rec_id}")
+            return post
+
+    def get_post(self, post_id: int) -> QueuedPostRecord | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM post_queue WHERE id = ?", (post_id,))
             row = cursor.fetchone()
+            if not row:
+                return None
             return QueuedPostRecord(
                 id=row["id"],
                 thread_id=row["thread_id"],
@@ -103,21 +133,33 @@ class QueueStore:
                 slot_local=row["slot_local"],
                 user_timezone=row["user_timezone"],
                 status=row["status"],
+                platform_post_id=row["platform_post_id"],
+                error_message=row["error_message"],
+                retry_count=row["retry_count"] if row["retry_count"] is not None else 0,
                 created_at=str(row["created_at"]),
             )
 
-    def get_queued_posts(self, status: str = "queued") -> list[QueuedPostRecord]:
+    def get_queued_posts(
+        self, status: str | None = "queued"
+    ) -> list[QueuedPostRecord]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT id, thread_id, draft_id, platform, final_text, slot_utc, slot_local, user_timezone, status, created_at
-                FROM post_queue
-                WHERE status = ?
-                ORDER BY slot_utc ASC
-                """,
-                (status,),
-            )
+            if status is not None:
+                cursor.execute(
+                    """
+                    SELECT * FROM post_queue
+                    WHERE status = ?
+                    ORDER BY slot_utc ASC
+                    """,
+                    (status,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM post_queue
+                    ORDER BY id DESC
+                    """
+                )
             rows = cursor.fetchall()
             return [
                 QueuedPostRecord(
@@ -130,6 +172,9 @@ class QueueStore:
                     slot_local=row["slot_local"],
                     user_timezone=row["user_timezone"],
                     status=row["status"],
+                    platform_post_id=row["platform_post_id"],
+                    error_message=row["error_message"],
+                    retry_count=row["retry_count"] if row["retry_count"] is not None else 0,
                     created_at=str(row["created_at"]),
                 )
                 for row in rows
@@ -142,6 +187,49 @@ class QueueStore:
                 "UPDATE post_queue SET status = 'cancelled' WHERE id = ? AND status = 'queued'",
                 (post_id,),
             )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_published(self, post_id: int, platform_post_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE post_queue
+                SET status = 'published', platform_post_id = ?, error_message = NULL
+                WHERE id = ?
+                """,
+                (platform_post_id, post_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_failed(
+        self, post_id: int, error_message: str, increment_retry: bool = True
+    ) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if increment_retry:
+                cursor.execute(
+                    """
+                    UPDATE post_queue
+                    SET status = 'failed',
+                        error_message = ?,
+                        retry_count = COALESCE(retry_count, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (error_message, post_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE post_queue
+                    SET status = 'failed',
+                        error_message = ?
+                    WHERE id = ?
+                    """,
+                    (error_message, post_id),
+                )
             conn.commit()
             return cursor.rowcount > 0
 
