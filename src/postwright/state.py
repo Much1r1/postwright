@@ -92,6 +92,8 @@ class PostwrightState(BaseModel):
     max_revisions: int = 2
     critic_score_threshold: int = 14
     total_llm_calls: int = 0
+    llm_retries: int = 0
+    llm_wait_time_seconds: float = 0.0
     draft_revision_counts: dict[str, int] = Field(default_factory=dict)
     human_rewrite_counts: dict[str, int] = Field(default_factory=dict)
     max_human_rewrites: int = 3
