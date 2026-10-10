@@ -1,5 +1,6 @@
 import os
 import re
+from typing import Any
 
 from postwright.platforms.base import PlatformAdapter, PublishResult, ValidationResult
 from postwright.platforms.http_client import XHttpClient
@@ -38,6 +39,9 @@ def count_x_weighted_length(text: str) -> int:
     return total_len
 
 
+get_x_weighted_length = count_x_weighted_length
+
+
 def split_text_into_sentences(text: str) -> list[str]:
     """Split text into sentences preserving sentence boundary punctuation."""
     raw_blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
@@ -62,8 +66,15 @@ class XAdapter(PlatformAdapter):
     def __init__(self, http_client: XHttpClient | None = None) -> None:
         self.http_client = http_client or XHttpClient()
 
-    def validate(self, text: str) -> ValidationResult:
-        """Validate text against X limits (280 weighted characters per tweet/thread part)."""
+    def validate(self, text_or_draft: Any) -> ValidationResult:
+        """Validate text or candidate draft against X limits (280 weighted characters per tweet/thread part)."""
+        if hasattr(text_or_draft, "content"):
+            text = text_or_draft.content
+        elif isinstance(text_or_draft, dict):
+            text = text_or_draft.get("content", "")
+        else:
+            text = str(text_or_draft)
+
         text = text.strip()
         weighted_len = count_x_weighted_length(text)
 

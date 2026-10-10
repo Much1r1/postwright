@@ -10,7 +10,8 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from postwright.config import get_settings
-from postwright.llm import get_llm, invoke_llm_with_resilience
+from postwright.llm import get_llm, invoke_with_resilience
+from postwright.platforms import get_adapter
 from postwright.prompts import (
     get_critic_system_prompt,
     get_drafter_system_prompt,
@@ -103,13 +104,6 @@ def extract_ideas_node(
         tot_cost = state.total_cost
         tot_retries = state.llm_retries
         tot_wait = state.llm_wait_time_seconds
-        llm_retries = state.get("llm_retries", 0)
-        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
-    else:
-        raw_note = state.raw_note
-        total_llm_calls = state.total_llm_calls
-        llm_retries = state.llm_retries
-        llm_wait_time = state.llm_wait_time_seconds
 
     note_content = raw_note.content if isinstance(raw_note, InputNote) else str(raw_note)
 
@@ -130,13 +124,11 @@ def extract_ideas_node(
         HumanMessage(content=user_prompt),
     ]
 
-    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
-        structured_llm, messages
-    )
-    res, retries, wait_sec = invoke_with_resilience(
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_with_resilience(
         llm=llm,
         messages=messages,
         schema=ExtractedIdeasOutput,
+        return_details=True,
     )
 
     if isinstance(res, ExtractedIdeasOutput):
@@ -158,8 +150,6 @@ def extract_ideas_node(
         "total_cost": round(tot_cost + cost, 6),
         "llm_retries": tot_retries + retries,
         "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
-        "llm_retries": llm_retries + retries,
-        "llm_wait_time_seconds": llm_wait_time + wait_sec,
     }
 
 
@@ -210,8 +200,6 @@ def draft_node(
         tot_cost = state.get("total_cost", 0.0)
         tot_retries = state.get("llm_retries", 0)
         tot_wait = state.get("llm_wait_time_seconds", 0.0)
-        llm_retries = state.get("llm_retries", 0)
-        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         draft_revision_counts = dict(state.get("draft_revision_counts", {}))
         revision_count = state.get("revision_count", 0)
         threshold = state.get("critic_score_threshold", get_settings().critic_score_threshold)
@@ -224,8 +212,6 @@ def draft_node(
         tot_cost = state.total_cost
         tot_retries = state.llm_retries
         tot_wait = state.llm_wait_time_seconds
-        llm_retries = state.llm_retries
-        llm_wait_time = state.llm_wait_time_seconds
         draft_revision_counts = dict(state.draft_revision_counts)
         revision_count = state.revision_count
         threshold = state.critic_score_threshold
@@ -260,13 +246,11 @@ def draft_node(
             HumanMessage(content=user_prompt),
         ]
 
-        res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
-            structured_llm, messages
-        )
-        res, retries, wait_sec = invoke_with_resilience(
+        res, in_tok, out_tok, cost, retries, wait_time = invoke_with_resilience(
             llm=llm,
             messages=messages,
             schema=CandidateDraftsOutput,
+            return_details=True,
         )
 
         if isinstance(res, CandidateDraftsOutput):
@@ -326,13 +310,11 @@ def draft_node(
         HumanMessage(content=user_prompt),
     ]
 
-    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
-        structured_llm, messages
-    )
-    res, retries, wait_sec = invoke_with_resilience(
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_with_resilience(
         llm=llm,
         messages=messages,
         schema=CandidateDraftsOutput,
+        return_details=True,
     )
 
     if isinstance(res, CandidateDraftsOutput):
@@ -391,8 +373,6 @@ def draft_node(
         "total_cost": round(tot_cost + cost, 6),
         "llm_retries": tot_retries + retries,
         "llm_wait_time_seconds": round(tot_wait + wait_time, 3),
-        "llm_retries": llm_retries + retries,
-        "llm_wait_time_seconds": llm_wait_time + wait_sec,
         "draft_revision_counts": draft_revision_counts,
         "revision_count": revision_count + 1,
         "user_feedback": None,
@@ -415,8 +395,6 @@ def critic_node(
         tot_cost = state.get("total_cost", 0.0)
         tot_retries = state.get("llm_retries", 0)
         tot_wait = state.get("llm_wait_time_seconds", 0.0)
-        llm_retries = state.get("llm_retries", 0)
-        llm_wait_time = state.get("llm_wait_time_seconds", 0.0)
         revision_count = state.get("revision_count", 0)
         existing_critiques = list(state.get("critiques", []))
     else:
@@ -430,8 +408,6 @@ def critic_node(
         tot_cost = state.total_cost
         tot_retries = state.llm_retries
         tot_wait = state.llm_wait_time_seconds
-        llm_retries = state.llm_retries
-        llm_wait_time = state.llm_wait_time_seconds
         revision_count = state.revision_count
         existing_critiques = list(state.critiques)
 
@@ -468,9 +444,13 @@ def critic_node(
         HumanMessage(content=user_prompt),
     ]
 
-    res, in_tok, out_tok, cost, retries, wait_time = invoke_llm_with_resilience(
-        structured_llm, messages
+    res, in_tok, out_tok, cost, retries, wait_time = invoke_with_resilience(
+        llm=llm,
+        messages=messages,
+        schema=CriticOutput,
+        return_details=True,
     )
+
     if isinstance(res, CriticOutput):
         items = res.critiques
     elif isinstance(res, dict) and "critiques" in res:

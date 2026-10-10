@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from postwright.adapters import XAdapter, get_adapter, get_x_weighted_length
 from postwright.eval import (
     calculate_aggregates,
     check_specificity,
@@ -16,6 +15,7 @@ from postwright.eval import (
     run_eval_suite,
 )
 from postwright.llm import calculate_cost, get_model_pricing
+from postwright.platforms import XAdapter, get_adapter, get_x_weighted_length
 from postwright.state import CandidateDraft
 
 
@@ -104,7 +104,6 @@ def test_specificity_checker():
     draft1 = "We reduced latency from 450ms to 85ms using DB caching!"
 
     assert check_specificity(note_with_num, draft1) is True
-    # draft2 has 'refactored' and 'faster' (words > 5 chars overlap) or digit check
     note_vague = "Did some work today."
     draft_vague = "Just working hard."
     assert check_specificity(note_vague, draft_vague) is False
@@ -113,43 +112,38 @@ def test_specificity_checker():
 def test_platform_adapters_and_length_validation():
     x_adapter = XAdapter()
     url_text = "Check out https://github.com/example/repo for details!"
-    # URL counts as 23 chars
     expected_len = len("Check out ") + 23 + len(" for details!")
     assert get_x_weighted_length(url_text) == expected_len
 
     short_draft = CandidateDraft(
         id="d1", idea_id="i1", platform="x", angle_format="build_log", content="Short tweet"
     )
-    assert x_adapter.validate(short_draft) is True
+    assert bool(x_adapter.validate(short_draft)) is True
 
     long_draft = CandidateDraft(
         id="d2", idea_id="i1", platform="x", angle_format="build_log", content="A" * 300
     )
-    assert x_adapter.validate(long_draft) is False
+    assert bool(x_adapter.validate(long_draft)) is False
 
     linkedin_adapter = get_adapter("linkedin")
     li_draft = CandidateDraft(
         id="d3", idea_id="i1", platform="linkedin", angle_format="build_log", content="B" * 2500
     )
-    assert linkedin_adapter.validate(li_draft) is True
+    assert bool(linkedin_adapter.validate(li_draft)) is True
 
 
 def test_correlation_and_bias_edge_cases():
-    # Normal case
     x = [10.0, 12.0, 14.0, 16.0, 18.0]
     y = [11.0, 13.0, 15.0, 17.0, 19.0]
     corr = compute_pearson_correlation(x, y)
     assert corr == 1.0
 
-    # Identical scores (zero variance)
     x_identical = [15.0, 15.0, 15.0]
     y_identical = [12.0, 12.0, 12.0]
     assert compute_pearson_correlation(x_identical, y_identical) == 0.0
 
-    # Single case
     assert compute_pearson_correlation([15.0], [12.0]) == 0.0
 
-    # Aggregates math
     case_results = [
         {
             "case_id": "c1",
@@ -178,7 +172,7 @@ def test_correlation_and_bias_edge_cases():
     assert aggs["case_count"] == 2
     assert aggs["mean_critic_score"] == 14.0
     assert aggs["mean_judge_score"] == 13.0
-    assert aggs["mean_bias"] == 1.0  # 14.0 - 13.0
+    assert aggs["mean_bias"] == 1.0
     assert aggs["below_threshold_rate"] == 50.0
     assert aggs["length_compliance_rate"] == 100.0
     assert aggs["specificity_rate"] == 50.0
@@ -202,7 +196,6 @@ models:
     calc_cost = calculate_cost("claude-3-5-sonnet-20241022", 1000, 1000, pricing_path=pricing_yaml)
     assert calc_cost == round((1000 / 1e6) * 3.00 + (1000 / 1e6) * 15.00, 6)
 
-    # Missing model should issue warning and return (0.0, 0.0) without crashing
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         missing_in, missing_out = get_model_pricing("nonexistent-model-xyz", pricing_path=pricing_yaml)
@@ -250,19 +243,16 @@ def test_report_generation_and_compare_deltas():
     assert "Mean Critic Total:** 16" in report_md
     assert "| case-01 | X | 0 | 16/20 | 15/20 | No | Yes | Yes |" in report_md
 
-    # Test same model warning
     config_info_same = dict(config_info)
     config_info_same["judge_model"] = "llama-3.3-70b-versatile"
     report_same_md = generate_markdown_report(case_results, aggs, config_info_same)
     assert "WARNING:** Pipeline model and judge model are the same" in report_same_md
 
-    # Test compare deltas format
     deltas = format_report_comparison(aggs, report_md)
     assert "Delta Comparison" in deltas
 
 
 def test_eval_path_never_touches_queue_or_approval_db(tmp_path, monkeypatch):
-    """Assert via spies that running postwright eval NEVER touches queue store or approval store."""
     mock_queue = MagicMock()
     mock_approval = MagicMock()
 
@@ -292,7 +282,6 @@ def test_eval_path_never_touches_queue_or_approval_db(tmp_path, monkeypatch):
         judge_llm=fake_llm,
     )
 
-    # Assert that no enqueue or approval records were called
     mock_queue.enqueue.assert_not_called()
     mock_approval.record_approval.assert_not_called()
 

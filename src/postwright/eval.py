@@ -10,9 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from postwright.adapters import get_adapter
 from postwright.config import get_settings
-from postwright.llm import get_llm, invoke_llm_with_resilience
+from postwright.llm import get_llm, invoke_with_resilience
 from postwright.nodes import (
     capture_node,
     critic_node,
@@ -20,6 +19,7 @@ from postwright.nodes import (
     extract_ideas_node,
     pick_angles_node,
 )
+from postwright.platforms import get_adapter
 from postwright.state import PostwrightState
 
 logger = logging.getLogger("postwright.eval")
@@ -63,16 +63,13 @@ def load_eval_cases(cases_path: Path | str | None = None) -> list[dict[str, Any]
 
 def check_specificity(note: str, draft_text: str) -> bool:
     """Check if the draft contains a concrete detail or number from the note."""
-    # Check if numbers present in note appear in draft or if draft contains digits
     note_numbers = re.findall(r"\b\d+(?:\.\d+)?%?\b", note)
     if note_numbers:
         for num in note_numbers:
             if num in draft_text:
                 return True
-    # Fallback: check if draft contains any digit or concrete technical term
     if re.search(r"\d+", draft_text):
         return True
-    # Fallback: check overlapping significant words (length > 5)
     note_words = {w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", note)}
     draft_words = {w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", draft_text)}
     overlap = note_words.intersection(draft_words)
@@ -111,8 +108,12 @@ def run_eval_pipeline_on_case(
     ext_out = extract_ideas_node(state, llm=llm)
     state.extracted_ideas = ext_out.get("extracted_ideas", [])
     state.total_llm_calls += ext_out.get("total_llm_calls", 0)
+    state.total_input_tokens += ext_out.get("total_input_tokens", 0)
+    state.total_output_tokens += ext_out.get("total_output_tokens", 0)
+    state.total_cost += ext_out.get("total_cost", 0.0)
+    state.llm_retries += ext_out.get("llm_retries", 0)
+    state.llm_wait_time_seconds += ext_out.get("llm_wait_time_seconds", 0.0)
 
-    # Filter extracted ideas for requested target platform if specified
     # 3. Pick angles
     pa_out = pick_angles_node(state)
     state.angled_ideas = [
@@ -127,12 +128,22 @@ def run_eval_pipeline_on_case(
         draft_out = draft_node(state, llm=llm)
         state.candidate_drafts = draft_out.get("candidate_drafts", [])
         state.total_llm_calls = draft_out.get("total_llm_calls", state.total_llm_calls)
+        state.total_input_tokens = draft_out.get("total_input_tokens", state.total_input_tokens)
+        state.total_output_tokens = draft_out.get("total_output_tokens", state.total_output_tokens)
+        state.total_cost = draft_out.get("total_cost", state.total_cost)
+        state.llm_retries = draft_out.get("llm_retries", state.llm_retries)
+        state.llm_wait_time_seconds = draft_out.get("llm_wait_time_seconds", state.llm_wait_time_seconds)
 
         # Critic step
         critic_out = critic_node(state, llm=llm)
         state.candidate_drafts = critic_out.get("candidate_drafts", [])
         state.critiques = critic_out.get("critiques", state.critiques)
         state.total_llm_calls = critic_out.get("total_llm_calls", state.total_llm_calls)
+        state.total_input_tokens = critic_out.get("total_input_tokens", state.total_input_tokens)
+        state.total_output_tokens = critic_out.get("total_output_tokens", state.total_output_tokens)
+        state.total_cost = critic_out.get("total_cost", state.total_cost)
+        state.llm_retries = critic_out.get("llm_retries", state.llm_retries)
+        state.llm_wait_time_seconds = critic_out.get("llm_wait_time_seconds", state.llm_wait_time_seconds)
         state.below_threshold = critic_out.get("below_threshold", False)
 
         has_failing = any(
@@ -148,7 +159,6 @@ def run_eval_pipeline_on_case(
     # Select best candidate draft for platform
     final_draft = None
     if state.candidate_drafts:
-        # Sort by score descending
         sorted_drafts = sorted(
             state.candidate_drafts,
             key=lambda d: d.score if d.score is not None else -1,
@@ -163,7 +173,7 @@ def run_eval_pipeline_on_case(
 
     # Platform length compliance check via adapter
     adapter = get_adapter(platform)
-    length_valid = adapter.validate(final_draft) if final_draft else False
+    length_valid = adapter.validate(final_draft).is_valid if final_draft else False
 
     # Specificity check
     spec_valid = check_specificity(note_text, final_content)
@@ -203,6 +213,7 @@ def run_independent_judge(
         judge_llm = get_llm(
             provider=settings.judge_provider,
             model=eff_judge_model,
+            is_judge=True,
         )
 
     judge_system_prompt = (
@@ -221,15 +232,18 @@ def run_independent_judge(
         f"Draft to Evaluate:\n{draft_content}"
     )
 
-    structured_judge = judge_llm.with_structured_output(JudgeEvaluationOutput)
     messages = [
         {"role": "system", "content": judge_system_prompt},
         {"role": "user", "content": user_prompt},
     ]
 
     try:
-        res, _in_tok, _out_tok, _cost, _retries, _wait_time = invoke_llm_with_resilience(
-            structured_judge, messages, model_name=eff_judge_model
+        res, _in_tok, _out_tok, _cost, _retries, _wait_time = invoke_with_resilience(
+            llm=judge_llm,
+            messages=messages,
+            schema=JudgeEvaluationOutput,
+            model_name=eff_judge_model,
+            return_details=True,
         )
         if isinstance(res, JudgeEvaluationOutput):
             eval_res = res
