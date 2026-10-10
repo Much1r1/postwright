@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -9,6 +10,9 @@ class ValidationResult:
     char_count: int = 0
     max_length: int = 280
     thread_parts: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.is_valid
 
 
 @dataclass
@@ -23,8 +27,8 @@ class PublishResult:
 class PlatformAdapter(ABC):
 
     @abstractmethod
-    def validate(self, text: str) -> ValidationResult:
-        """Validate text against platform limits and return ValidationResult."""
+    def validate(self, text_or_draft: Any) -> ValidationResult:
+        """Validate text or candidate draft against platform limits and return ValidationResult."""
 
     @abstractmethod
     def split(self, text: str) -> list[str]:

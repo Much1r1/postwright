@@ -1,3 +1,5 @@
+from typing import Any
+
 from postwright.platforms.base import PlatformAdapter, PublishResult, ValidationResult
 
 LINKEDIN_MAX_LENGTH = 3000
@@ -10,8 +12,15 @@ class LinkedInAdapter(PlatformAdapter):
     Publishing raises NotImplementedError per specifications.
     """
 
-    def validate(self, text: str) -> ValidationResult:
+    def validate(self, text_or_draft: Any) -> ValidationResult:
         """Validate LinkedIn post length (max 3000 characters)."""
+        if hasattr(text_or_draft, "content"):
+            text = text_or_draft.content
+        elif isinstance(text_or_draft, dict):
+            text = text_or_draft.get("content", "")
+        else:
+            text = str(text_or_draft)
+
         text = text.strip()
         char_count = len(text)
         errors: list[str] = []
